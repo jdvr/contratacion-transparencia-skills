@@ -5,9 +5,7 @@ description: "Use when hay que consultar o descargar datos abiertos del Gobierno
 
 # Datos abiertos de Canarias (CKAN + ISTAC)
 
-**Idea central:** el dominio `datos.canarias.es` **no** es un CKAN en la raíz. `/portal/` es WordPress; la API real vive en subpaths. Asume esto o te comerás un 404 y concluirás que no hay datos.
-
-Los patrones CKAN genéricos (descubrir la ruta real de la API, datastore vs CSV, topes de filas, codificaciones) viven en la skill `ckan`; esta skill se centra en los datasets, rutas y trampas de GobCan.
+**Idea central:** el dominio `datos.canarias.es` **no** es un CKAN en la raíz. `/portal/` es WordPress; la API real vive en subpaths. Asume esto o te comerás un 404 y concluirás que no hay datos. Los patrones CKAN genéricos (descubrir la ruta real de la API, datastore vs CSV, topes de filas, codificaciones) viven en la skill `ckan`; esta skill se centra en los datasets, rutas y trampas de GobCan.
 
 ## Mapa real
 
@@ -142,8 +140,7 @@ Mayoría `istac-aviso-legal` / `gobcan-aviso-legal`: reutilización permitida co
 | `metadata_modified` reciente en datos de 2020 | El cosechador toca fechas. Comprueba el periodo dentro del dato. |
 | `sum(importe::numeric)` → 500 | Puede fallar según columna; si es así, agrega en cliente. En contratos, `sum(importe_ofertado::numeric)` sí funciona. |
 | `datastore_active: true` pero `datastore_search` da `success: false` | Pasa en el dataset de contratos de 2019. Baja el CSV o usa la serie 2020+. |
-| Buscar el proveedor por su nombre en `objeto_contrato` | El objeto nombra el producto (la suite contractuada), no al fabricante. Busca por NIF. |
-| Producto = proveedor | Falso: el mismo producto lo mantienen varios proveedores distintos. Filtra por NIF y usa el CPV para ver el ecosistema, pero no sumes mantenimiento con licencias. |
+| Buscar el proveedor por su nombre en `objeto_contrato`, o dar el producto por adjudicatario | El objeto nombra el producto (la suite contratada), no al fabricante ni a quien cobra: el mismo producto lo mantienen varios proveedores. Busca por NIF y usa el CPV para el ecosistema; no sumes mantenimiento con licencias. |
 | `contrataciondelestado.es` y `ted.europa.eu` rechazan `curl` | El **sitio web** sí (000). La **API TED v3** no: `POST https://api.ted.europa.eu/v3/notices/search` con `{"query":"publication-number=<n>","fields":[...]}` responde JSON, y el XML del anuncio está en `https://ted.europa.eu/en/notice/<n>/xml`. |
 | NIF raros (valores generalizados: `**...**`, `12345...`) | Hay valores corruptos en `adjudicataria_nif`; un join por NIF puede fallar en silencio. Valida el formato (letra + 8 dígitos). |
 | `q=` y `filters=` discrepan en 1 fila | `q` es full-text y arrastra ruido. Para secciones presupuestarias usa `filters` exacto. |
@@ -159,3 +156,5 @@ Mayoría `istac-aviso-legal` / `gobcan-aviso-legal`: reutilización permitida co
 2. Compara el `count` con las filas que has traído; si difieren, pagina.
 3. Guarda `name` del dataset, `id` del recurso, URL y fecha de consulta.
 4. Distingue fecha del dato (`TIME_PERIOD`) de fecha de metadato (`metadata_modified`).
+
+**Verificado: 2026-10-28** (construida con el repo; sin re-ejecutar en vivo desde entonces).

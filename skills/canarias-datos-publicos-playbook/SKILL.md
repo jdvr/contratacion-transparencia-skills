@@ -78,3 +78,5 @@ Si falta cualquiera de 1–5, el dato es una pista, no un resultado.
 4. Si no hay datastore: `mapa-web` del portal + ficha + `descargaCSV.jsp` (2–3 req).
 5. Contraste con el documento oficial si la cifra es publicable (1 req).
 6. Cachea el resultado en local con su ficha de evidencia.
+
+**Verificado: 2026-10-28** (construida con el repo; sin re-ejecutar en vivo desde entonces).
