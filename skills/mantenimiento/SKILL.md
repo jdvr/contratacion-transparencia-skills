@@ -42,11 +42,12 @@ obligatorio viven en `skills/README.md`; esta skill no los vuelve a formular, te
 4. **Sync de copias globales**: `cp skills/<ruta>/SKILL.md ~/.claude/skills/<ruta>/SKILL.md`
    para cada skill tocada; `diff -q` para probar igualdad; si la carpeta global no
    existe, créala. Nunca al revés (la copia global nunca es fuente).
-5. **Pre-publicación** (cada vez que vaya a publicarse):
-   `git grep -n "/Users/\|_API_KEY=\|@gmail.com"` sobre ficheros versionados →
-   vacío (las menciones instruccionales de claves están bien; valores, no);
-   `git check-ignore .local-mining` exit 0; frontmatter de todas las skills válido;
-   `git log --oneline` legible; `git status` limpio.
+5. **Pre-publicación** (cada vez que vaya a publicarse): `bash scripts/check-skills.sh`
+   → exit 0. Cubre frontmatter, marca `Verificado:`, índice y enrutado, y los greps de
+   filtración (`git grep` de `/Users/`, `_API_KEY=`, `@gmail.com`, claves; la propia
+   línea que enseña el patrón queda exenta). Además `.local-mining` ignorado
+   (`git check-ignore .local-mining` exit 0), `git log --oneline` legible y `git status`
+   limpio. El mismo script corre en CI en cada PR y push a `main`.
 6. **Retirar o jubilar una skill desactualizada grave**: si un portal cambió de raíz y la gramática
    se rompe sin remedio inmediato: marca la skill "Verificado: <fecha> — roto, ver
    <issue/commit>" y quítala del enrutado; no la borres si alguien la usa globalmente,
@@ -72,8 +73,11 @@ obligatorio viven en `skills/README.md`; esta skill no los vuelve a formular, te
 `docs:` índices/README/ejemplos · `chore:` scaffolding, git, config.
 Un commit = una pieza revisable. Mensaje en español, imperativo.
 
-**Verificado: 2026-10-28** (el repo entero se construyó con esta rutina; los greps de
-filtración y el test de aceptación del 2026-10-28 son el ejemplo en vivo).
+**Verificado: 2026-10-30** (la receta 5 ya no es un grep manual: la ejecuta
+`bash scripts/check-skills.sh` en local y en CI, con 25 casos de test; recorre todo el árbol
+publicado salvo `scripts/` y `docs/superpowers/`, que son el detector y su documentación).
+El repo se construyó con esta rutina y el test de aceptación del 2026-10-28 sigue siendo el
+ejemplo en vivo.
 
 Antes de cerrar un ciclo de mantenimiento: greps de filtración pasados, sync verificado,
 índice y enrutado consistentes, `git status` limpio, fechas "Verificado" honestas.

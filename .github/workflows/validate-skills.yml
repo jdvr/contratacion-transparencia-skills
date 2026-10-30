@@ -1,0 +1,69 @@
+name: validate-skills
+
+# Dos capas: la especificación Agent Skills (acción de marketplace) y las reglas
+# propias del repo (scripts/check-skills.sh). Ver docs/superpowers/specs/2026-10-30-ci-validacion-skills-design.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-skills-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: descubrir skills
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skills: ${{ steps.list.outputs.skills }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Listar directorios de skills/
+        id: list
+        # Se descubren del árbol, no de una lista fija: añadir una skill no exige tocar el workflow.
+        # Los nombres van a una matriz y a rutas: si uno no es kebab-case, se falla aquí y no
+        # con siete jobs apuntando a rutas que no existen.
+        run: |
+          bad="$(ls -d skills/*/ | sed 's#skills/##; s#/$##' | grep -vE '^[a-z0-9][a-z0-9-]*$' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::nombre de skill no válido (kebab-case: a-z, 0-9 y guiones): $bad"
+            exit 1
+          fi
+          skills="$(ls -d skills/*/ | xargs -n1 basename | jq -R -s -c 'split("\n")[:-1]')"
+          echo "skills=$skills" >> "$GITHUB_OUTPUT"
+          echo "$skills"
+
+  spec:
+    name: spec (${{ matrix.skill }})
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        skill: ${{ fromJSON(needs.discover.outputs.skills) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar SKILL.md contra la especificación Agent Skills
+        uses: Flash-Brew-Digital/validate-skill@v1
+        with:
+          path: ./skills/${{ matrix.skill }}
+          validate-references: "true"
+
+  repo-rules:
+    name: repo-rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reglas del repo (estilo, Verificado, índice, enrutado, fugas)
+        run: bash scripts/check-skills.sh "$GITHUB_WORKSPACE"
+      - name: El validador tiene test propio y pasa
+        run: bash scripts/test-check-skills.sh

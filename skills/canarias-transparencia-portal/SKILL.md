@@ -112,3 +112,5 @@ El portal no tiene formulario propio: enlaza a la sede electrónica (`sede.gobie
 2. Cuenta filas y compara con el total que declara la página.
 3. Distingue "página actualizada" de "dato actualizado": mira el ejercicio/fecha dentro del documento.
 4. Guarda la URL exacta, la fecha de descarga y el número de filas junto a cada cifra.
+
+**Verificado: 2026-10-28** (construida con el repo; sin re-ejecutar en vivo desde entonces).
