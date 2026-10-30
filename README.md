@@ -51,6 +51,15 @@ Estos portales son un **servicio público para toda la ciudadanía**: un uso abu
 - Los agregadores (LiciRadar, OpenProcurements, concursospublicos.com...) son **fuente secundaria**: se verifican siempre contra PLACSP/BOE/TED/portal oficial.
 - Este repo no tiene relación oficial con ninguna de las plataformas: son herramientas de analista ciudadano, sin garantía (CC BY 4.0, véase LICENSE).
 
+## Validación automática
+
+Cada PR y cada push a `main` valida las skills en dos capas (`.github/workflows/validate-skills.yml`): la **especificación Agent Skills** (frontmatter, `name` = directorio, longitud de `description`) con la acción `Flash-Brew-Digital/validate-skill`, y las **reglas de este repo** (estilo, marca `Verificado:`, índice, enrutado, fugas de material privado) con `scripts/check-skills.sh`. En local, lo mismo que corre el CI y sin red:
+
+```bash
+bash scripts/check-skills.sh           # reglas del repo sobre las 7 skills
+bash scripts/test-check-skills.sh      # test de fixtures del propio validador
+```
+
 ## Contribuir
 
 Lee `skills/README.md`: convención de nombres, estilo y el checklist obligatorio (frontmatter, trampas verificadas, controles/adversarial y test adversarial con agente fresco antes de publicar).
