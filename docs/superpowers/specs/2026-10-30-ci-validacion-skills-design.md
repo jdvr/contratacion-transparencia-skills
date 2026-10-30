@@ -115,3 +115,26 @@ Exit 0 si no hay errores; 1 si hay alguno. Los avisos no rompen el build.
 - Mensajes de error concretos (en inglés en CI, como el resto de config del repo, o en
   español como el contenido: se elige español, es contenido del repo).
 - README: una línea en "Desarrollo" explicando que el CI corre y cómo lanzarlo en local.
+
+## 8. Cómo quedó implementado (2026-10-30)
+
+La implementación se validó con la acción `@v1` real ejecutada en local (7/7 skills válidas)
+y con un clon limpio del repo (`check-skills: 7 skills, 0 errores`). Diferencias respecto a
+lo planeado, todas para cerrar huecos que aparecieron al construir:
+
+- **Fugas en todo el árbol versionado**, no solo en las 4+7 rutas del punto 9: se usan
+  `git grep` (o `grep -r` si no hay git). Un `_API_KEY=` pegado en `examples/` filtra igual
+  que uno en un `SKILL.md`. Única exención: la línea de la receta en
+  `skills/mantenimiento/SKILL.md`; `scripts/` y `docs/superpowers/` quedan fuera del escaneo
+  porque citan los patrones a propósito.
+- **Nombres de sección equivalentes**: `Enrutado por pregunta` y `Gramática de URLs` valen
+  como mapa; `Antes de dar un dato por bueno` y `Contrato de evidencia` valen como controles;
+  `mantenimiento` está exenta de tabla de trampas (es skill de proceso).
+- **Frontmatter**: el cierre solo cuenta en las 6 primeras líneas, para que un `---` del
+  cuerpo no se confunda con el fin del frontmatter.
+- **Huérfanas**: se exige el nombre entre backticks (como en las tablas), no una subcadena:
+  `datos` dentro de `canarias-datos-abiertos` no cuenta como entrada.
+- **Directorios sin `SKILL.md`** se marcan como error; antes eran invisibles.
+- **La matriz del CI se descubre** del árbol (`discover` + `jq`) y rechaza nombres que no
+  sean kebab-case, en vez de la lista fija del plan.
+- **El árbol no se toca al validar**: los tests trabajan sobre copias en `mktemp -d`.
