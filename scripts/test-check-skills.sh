@@ -87,8 +87,11 @@ expect 1 "controles" "$R" "sin sección de controles"
 R="$(make_root)"; printf '\nContacto: alguien@gmail.com\n' >> "$R/skills/demo/SKILL.md"
 expect 1 "fuga" "$R" "correo personal en una skill"
 
-R="$(make_root)"; printf '\n- Receta: `git grep -n "/Users/\\|_API_KEY=\\|@gmail.com"`\n' >> "$R/skills/demo/SKILL.md"
-expect 0 "0 errores" "$R" "la receta git grep queda exenta"
+R="$(make_root)"; mv "$R/skills/demo" "$R/skills/mantenimiento"
+perl -pi -e 's/^name: demo/name: mantenimiento/' "$R/skills/mantenimiento/SKILL.md"
+perl -pi -e 's/`demo`/`mantenimiento`/' "$R/skills/README.md"
+printf '\n- Receta: `git grep -n "/Users/\\|_API_KEY=\\|@gmail.com"`\n' >> "$R/skills/mantenimiento/SKILL.md"
+expect 0 "0 errores" "$R" "la receta git grep queda exenta en mantenimiento"
 
 R="$(make_root)"; mkdir -p "$R/skills/huerfana"
 sed 's/^name: demo/name: huerfana/' "$R/skills/demo/SKILL.md" > "$R/skills/huerfana/SKILL.md"
@@ -120,6 +123,36 @@ expect 0 "0 errores" "$R" "mantenimiento exenta de tabla de trampas"
 
 R="$(make_root)"; perl -pi -e 's/^## Controles y revisión adversarial$/## Contrato de evidencia (no negociable)/' "$R/skills/demo/SKILL.md"
 expect 0 "0 errores" "$R" '"Contrato de evidencia" vale como controles'
+
+R="$(make_root)"; printf '\nContacto: alguien@gmail.com (ver git grep en la receta)\n' >> "$R/skills/demo/SKILL.md"
+expect 1 "fuga" "$R" "la exención no cubre una skill de datos"
+
+R="$(make_root)"; mkdir -p "$R/examples"; printf '# Ejemplo\n\nRuta: /Users/alguien/privado\n' > "$R/examples/fuga.md"
+expect 1 "fuga" "$R" "fuga fuera de skills/ (examples)"
+
+R="$(make_root)"; perl -0pi -e 's/(# Demo\n)/$1\n---\n/' "$R/skills/demo/SKILL.md"
+expect 0 "0 errores" "$R" "un --- en el cuerpo no cierra el frontmatter"
+
+R="$(make_root)"; perl -pi -e 's/^description:.*$/description: '"'"'Use when hay que probar el validador.'"'"'/' "$R/skills/demo/SKILL.md"
+expect 0 "0 errores" "$R" "description con comillas simples"
+
+R="$(make_root)"
+n="$(grep -c '' "$R/skills/demo/SKILL.md")"
+for i in $(seq 1 $((161 - n))); do printf 'relleno %s\n' "$i" >> "$R/skills/demo/SKILL.md"; done
+perl -0pi -e 's/\n\z//' "$R/skills/demo/SKILL.md"
+expect 1 "líneas" "$R" "cuenta la última línea aunque no acabe en salto"
+
+R="$(make_root)"; mkdir -p "$R/skills/datos"
+printf '| `canarias-datos-abiertos` | señuelo con el nombre dentro |\n' >> "$R/skills/README.md"
+sed 's/^name: demo/name: datos/' "$R/skills/demo/SKILL.md" > "$R/skills/datos/SKILL.md"
+expect 1 "huérfana" "$R" "nombre que aparece como subcadena en otra skill"
+
+R="$(make_root)"; mkdir -p "$R/skills/sin-skill"
+expect 1 "SKILL.md" "$R" "directorio sin SKILL.md"
+
+R="$(make_root)"; mkdir -p "$R/skills/collision"
+printf -- '---\nname: mal\n\n# X\n\nTexto con frontmatter abierto.\n\n---\n\n**Idea central:** x\n' > "$R/skills/collision/SKILL.md"
+expect 1 "frontmatter sin cerrar" "$R" "frontmatter abierto y --- tardío en el cuerpo"
 
 R="$(make_root)"
 git -C "$R" init -q

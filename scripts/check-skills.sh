@@ -15,43 +15,65 @@ ERRORS=0
 WARNINGS=0
 SKILLS=0
 MAX_LINES=160
-TODAY="$(date +%Y-%m-%d)"
+TODAY="$(date -u +%Y-%m-%d)"   # UTC: la fecha del runner, no la del portátil
 
 # Fugas de material privado: rutas personales, claves y correos.
 LEAK_PATTERN='/Users/|_API_KEY=|@gmail\.com|BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}'
+# Ruta de la receta que enseña el patrón (no un valor): única línea exenta.
+RECIPE_FILE="skills/mantenimiento/SKILL.md"
 
 err()  { printf '::error file=%s,line=%s::%s\n' "$1" "${2:-1}" "$3"; ERRORS=$((ERRORS + 1)); }
-warn() { printf '::warning file=%s,line=%s::%s\n' "$1" "${2:-1}" "$3"; WARNINGS=$((WARNINGS + 1)); }
+warn_msg() { printf '::warning::%s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
 
-# scan_leaks <ruta relativa>: marca líneas con material privado.
-# Excepción: las líneas que contienen "git grep" son la receta que enseña el patrón,
-# no un valor; sin esta exención el repo se denuncia a sí mismo.
+# leak_matches: imprime "ruta:línea:texto" de todo fichero versionado (o del árbol si no hay git).
+leak_matches() {
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$ROOT" grep -nIE -- "$LEAK_PATTERN" 2>/dev/null
+  else
+    grep -rnIE --exclude-dir=.git --exclude-dir=.superpowers --exclude-dir=.local-mining \
+      -- "$LEAK_PATTERN" "$ROOT" 2>/dev/null | sed "s#^$ROOT/##"
+  fi
+}
+
+# scan_leaks: recorre TODO el árbol publicado, no solo las skills. Un `_API_KEY=`
+# pegado en examples/ o en un doc filtra igual que uno en un SKILL.md.
 scan_leaks() {
-  local rel="$1" abs="$ROOT/$1" hit line text
-  [ -f "$abs" ] || return 0
+  local hit path rest line text
   while IFS= read -r hit; do
-    line="${hit%%:*}"
-    text="${hit#*:}"
-    case "$text" in
-      *"git grep"*) continue ;;
+    [ -n "$hit" ] || continue
+    path="${hit%%:*}"
+    rest="${hit#*:}"
+    line="${rest%%:*}"
+    text="${rest#*:}"
+    # El detector y la documentación que lo explica citan los patrones a propósito.
+    case "$path" in
+      scripts/*|docs/superpowers/*) continue ;;
     esac
-    err "$rel" "$line" "posible fuga de material privado: ${text:0:70}"
-  done < <(grep -nE "$LEAK_PATTERN" "$abs")
+    # La receta que enseña el patrón no es una fuga. Solo esa línea, en ese fichero.
+    if [ "$path" = "$RECIPE_FILE" ]; then
+      case "$text" in
+        *"git grep"*) continue ;;
+      esac
+    fi
+    # No se imprime el valor: el log de Actions de un repo público también es público.
+    err "$path" "$line" "posible fuga de material privado (valor oculto: revísalo en la línea)"
+  done < <(leak_matches)
 }
 
 check_skill() {
-  local file="$1" rel dir fm_end first_first iline mline tline cline vline vdate lines desc dline
+  local file="$1" rel dir fm_end iline mline tline cline vline vdate lines desc dline first
 
   rel="${file#"$ROOT"/}"
   dir="$(basename "$(dirname "$file")")"
   SKILLS=$((SKILLS + 1))
 
-  # 1. Frontmatter presente y cerrado.
+  # 1. Frontmatter presente y cerrado en las primeras líneas (un `---` del cuerpo
+  #    no es el cierre: es un separador markdown).
   fm_end=0
   if [ "$(sed -n '1p' "$file")" = "---" ]; then
-    fm_end="$(awk 'NR > 1 && /^---[[:space:]]*$/ {print NR; exit}' "$file")"
+    fm_end="$(awk 'NR > 1 && NR <= 6 && /^---[[:space:]]*$/ {print NR; exit}' "$file")"
     if [ -z "$fm_end" ]; then
-      err "$rel" 1 "frontmatter sin cerrar (falta la línea --- final)"
+      err "$rel" 1 "frontmatter sin cerrar en las 6 primeras líneas"
       fm_end=0
     fi
   else
@@ -64,7 +86,7 @@ check_skill() {
     if [ -z "$dline" ]; then
       err "$rel" 1 "falta description en el frontmatter"
     else
-      desc="$(sed -n "${dline}p" "$file" | sed 's/^description:[[:space:]]*//; s/^"//; s/"$//')"
+      desc="$(sed -n "${dline}p" "$file" | sed 's/^description:[[:space:]]*//' | tr -d "\"'" | sed 's/[[:space:]]*$//')"
       case "$desc" in
         "Use when"*) ;;
         *) err "$rel" "$dline" 'description debe empezar por "Use when" (disparadores de enrutado)' ;;
@@ -72,11 +94,13 @@ check_skill() {
     fi
 
     # 3. Primer párrafo del cuerpo en negrita (la idea central).
-    iline="$(awk -v s="$fm_end" 'NR > s && NF && $0 !~ /^#/ {print NR; exit}' "$file")"
+    #    Se saltan encabezados y reglas horizontales (`---`) del cuerpo.
+    iline="$(awk -v s="$fm_end" 'NR > s && NF && $0 !~ /^#/ && $0 !~ /^---+[[:space:]]*$/ {print NR; exit}' "$file")"
     if [ -z "$iline" ]; then
       err "$rel" "$fm_end" "cuerpo vacío tras el frontmatter"
     else
-      case "$(sed -n "${iline}p" "$file")" in
+      first="$(sed -n "${iline}p" "$file")"
+      case "$first" in
         '**'*) ;;
         *) err "$rel" "$iline" "Idea central: el primer párrafo del cuerpo debe abrir con **...**" ;;
       esac
@@ -113,41 +137,50 @@ check_skill() {
     done < <(grep -nE '^\*\*Verificado: [0-9]{4}-[0-9]{2}-[0-9]{2}' "$file")
   fi
 
-  # 8. Límite de líneas (regla 5 de estilo: ≤ 160).
-  lines="$(wc -l < "$file" | tr -d ' ')"
+  # 8. Límite de líneas (regla 5 de estilo: ≤ 160). `grep -c ''` cuenta también
+  #    la última línea si el fichero no acaba en salto de línea; `wc -l` no.
+  lines="$(grep -c '' "$file")"
   if [ "$lines" -gt "$MAX_LINES" ]; then
     err "$rel" 1 "tiene $lines líneas (máximo $MAX_LINES)"
   fi
-
-  # 9. Fugas dentro de la skill.
-  scan_leaks "$rel"
 }
 
-# --- Skills ---
-for file in "$ROOT"/skills/*/SKILL.md; do
-  [ -f "$file" ] || continue
-  check_skill "$file"
+# --- Skills: se recorren los directorios, no solo los SKILL.md existentes,
+#     para que un directorio sin SKILL.md no pase invisible ---
+for d in "$ROOT"/skills/*/; do
+  [ -d "$d" ] || continue
+  name="$(basename "$d")"
+  if [ ! -f "$d/SKILL.md" ]; then
+    err "skills/$name/SKILL.md" 1 "directorio sin SKILL.md"
+    continue
+  fi
+  check_skill "$d/SKILL.md"
 done
 
-# --- Coherencia índice / enrutado ---
+# --- Coherencia índice / enrutado: se exige el nombre entre backticks, como
+#     aparece en las tablas; una subcadena ("datos" dentro de "canarias-datos-abiertos")
+#     no cuenta como entrada. ---
 for d in "$ROOT"/skills/*/; do
+  [ -d "$d" ] || continue
   name="$(basename "$d")"
-  grep -qF -- "$name" "$ROOT/skills/README.md" || \
-    err "skills/README.md" 1 "skill huérfana: $name no está en la tabla índice"
+  grep -qF -- "\`$name\`" "$ROOT/skills/README.md" 2>/dev/null || \
+    err "skills/README.md" 1 "skill huérfana: \`$name\` no está en la tabla índice"
   if [ "$name" != "mantenimiento" ]; then
-    grep -qF -- "$name" "$ROOT/AGENTS.md" || \
-      err "AGENTS.md" 1 "skill huérfana: $name no figura en el enrutado de AGENTS.md"
+    grep -qF -- "\`$name\`" "$ROOT/AGENTS.md" 2>/dev/null || \
+      err "AGENTS.md" 1 "skill huérfana: \`$name\` no figura en el enrutado de AGENTS.md"
   fi
 done
 
-# --- Fugas en los ficheros que enrutan ---
-scan_leaks "skills/README.md"
-scan_leaks "AGENTS.md"
-scan_leaks "README.md"
+# --- Fugas en TODO el árbol publicado ---
+scan_leaks
 
 # --- Material local fuera del repo ---
-if git -C "$ROOT" ls-files --error-unmatch .local-mining >/dev/null 2>&1; then
-  err ".gitignore" 1 "material local trackeado: .local-mining debe quedar fuera del repo"
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "$ROOT" ls-files --error-unmatch .local-mining >/dev/null 2>&1; then
+    err ".local-mining" 1 "material local trackeado: .local-mining debe quedar fuera del repo"
+  fi
+else
+  warn_msg "git no disponible en $ROOT: no se pudo comprobar si .local-mining está trackeado"
 fi
 
 printf 'check-skills: %s skills, %s errores, %s avisos\n' "$SKILLS" "$ERRORS" "$WARNINGS"

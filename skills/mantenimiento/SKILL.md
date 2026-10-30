@@ -74,8 +74,10 @@ obligatorio viven en `skills/README.md`; esta skill no los vuelve a formular, te
 Un commit = una pieza revisable. Mensaje en español, imperativo.
 
 **Verificado: 2026-10-30** (la receta 5 ya no es un grep manual: la ejecuta
-`scripts/check-skills.sh` en local y en CI, con 17 casos de test; el repo se construyó con
-esta rutina y el test de aceptación del 2026-10-28 sigue siendo el ejemplo en vivo).
+`bash scripts/check-skills.sh` en local y en CI, con 25 casos de test; recorre todo el árbol
+publicado salvo `scripts/` y `docs/superpowers/`, que son el detector y su documentación).
+El repo se construyó con esta rutina y el test de aceptación del 2026-10-28 sigue siendo el
+ejemplo en vivo.
 
 Antes de cerrar un ciclo de mantenimiento: greps de filtración pasados, sync verificado,
 índice y enrutado consistentes, `git status` limpio, fechas "Verificado" honestas.
