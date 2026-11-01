@@ -1,7 +1,8 @@
 // evaluador CLI entry point.
 // Exit codes: 0 = success, 3 = unknown (or not yet wired) command.
 // See docs/superpowers/specs/2026-10-31-evaluador-design.md.
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const EXIT_OK = 0;
 const EXIT_UNKNOWN_COMMAND = 3;
@@ -48,8 +49,20 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
+// Resolves the real path, following symlinks (npm bin shims invoke the entry
+// through a node_modules/.bin symlink). Returns null when unresolvable.
+function tryRealPath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
 // When invoked as the installed binary, run main and propagate the exit code.
-const entryHref = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
-if (entryHref === import.meta.url) {
+// Both sides are resolved to real paths so a symlinked npm-bin invocation matches.
+const entryRealPath = process.argv[1] ? tryRealPath(process.argv[1]) : null;
+const moduleRealPath = tryRealPath(fileURLToPath(import.meta.url));
+if (entryRealPath !== null && entryRealPath === moduleRealPath) {
   process.exitCode = await main(process.argv.slice(2));
 }
