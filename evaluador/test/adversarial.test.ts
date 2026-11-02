@@ -1122,6 +1122,28 @@ describe("parallel scheduler", () => {
     ).toBe(true);
   });
 
+  it("declares the budget overshoot in the final summary", async () => {
+    const session = newSession();
+    const lines: string[] = [];
+
+    const result = await runEval(
+      evalOpts(session, okDriver().driver, {
+        budget: 2,
+        jobs: 4,
+        logger: (line) => lines.push(line),
+        heartbeatMs: 0,
+      }),
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.spentThisRun).toBeGreaterThan(2);
+    const done = lines.find((line) => line.includes("done: exit 1"));
+    expect(done).toBeDefined();
+    expect(done).toContain(
+      `(+${result.spentThisRun - 2} call(s) over budget)`,
+    );
+  });
+
   it("keeps carried non-requested verdicts when a subset run is interrupted", async () => {
     const session = newSession();
     await runEval(
@@ -1233,6 +1255,8 @@ describe("parallel scheduler", () => {
     expect(saved.claims[0]?.claim.id).toBe("claim-c1");
     expect(saved.claims[0]?.recheck).toBe("interrumpido");
     expect(saved.claims[0]?.verdicts).toHaveLength(0);
+    expect(saved.petitions).toBe(2); // both aborted in-flight pairs were charged
+
 
     const resumed = okDriver();
     const second = await runEval(
