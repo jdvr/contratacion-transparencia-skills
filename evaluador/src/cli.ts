@@ -9,6 +9,8 @@ import { runEval } from "./adversarial.js";
 import { opencodeDriver } from "./driver/opencode.js";
 import type { Driver } from "./driver/types.js";
 import { initScripted } from "./init.js";
+import { DEFAULT_ROLES, ROLE_ALIASES } from "./rubric.js";
+import type { RoleId } from "./rubric.js";
 
 const EXIT_OK = 0;
 const EXIT_UNKNOWN_COMMAND = 3;
@@ -34,53 +36,138 @@ async function runInit(_args: string[]): Promise<number> {
   return initScripted(process.cwd(), (s) => process.stdout.write(s));
 }
 
-// eval <file> [-o <dir>] [--no-cache] [--budget N] [--git-branches]: runs the
-// structural gate and, when it passes, the adversarial phases via runEval. The
-// process exit code is runEval's own (0/1), gate failure stays 2 (gaps JSON on
-// stdout for the invoking model), and an unreadable report or a malformed flag
-// is a usage error (3). Issue artifacts are written by runEval (Task 10); the
-// four final outputs (Task 11) land in `-o <dir>` or next to the report;
-// `--git-branches` (off by default in v1) additionally creates
-// `problema/<claimId>` for blocking verdicts, with git failures degraded to
-// warnings. stdout stays reserved for the JSON status of a gate failure.
-async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
+// Parsed `eval` arguments. Kept separate from the command so the strict parsing
+// rules (unknown flags, flag-value guards, positional count) are unit-testable
+// without touching the filesystem or a driver.
+export interface EvalArgs {
+  file: string;
+  outDir?: string;
+  noCache: boolean;
+  gitBranches: boolean;
+  budget?: number;
+  roles?: RoleId[];
+}
+
+export type EvalArgsResult =
+  | { ok: true; args: EvalArgs }
+  | { ok: false; message: string };
+
+// Resolves a CLI role name to its RoleId: the ASCII id itself or a short alias
+// (contador → contadores, segunda → segunda-fuente).
+function resolveRole(name: string): RoleId | undefined {
+  const alias = ROLE_ALIASES[name];
+  if (alias !== undefined) return alias;
+  return (DEFAULT_ROLES as readonly string[]).includes(name)
+    ? (name as RoleId)
+    : undefined;
+}
+
+// Strict `eval` parser. Fail-closed rules (all exit 3 at the CLI):
+//   - any unknown token starting with "-" is a flag typo, never a file;
+//   - -o/--budget/--roles reject a missing value or one that starts with "-";
+//   - exactly one positional (the report path) is accepted;
+//   - --roles is a comma list resolved through ROLE_ALIASES, all names valid.
+export function parseEvalArgs(argv: string[]): EvalArgsResult {
   let noCache = false;
   let gitBranches = false;
-  let budgetOverride: number | undefined;
+  let budget: number | undefined;
   let outDir: string | undefined;
+  let roles: RoleId[] | undefined;
   const positional: string[] = [];
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i] ?? "";
-    if (arg === "--no-cache") {
-      noCache = true;
-    } else if (arg === "--git-branches") {
-      gitBranches = true;
-    } else if (arg === "-o") {
-      const value = args[i + 1];
-      if (value === undefined || value === "") {
-        console.error("evaluador: -o requires an output directory");
-        return EXIT_UNKNOWN_COMMAND;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i] ?? "";
+    switch (arg) {
+      case "--no-cache":
+        noCache = true;
+        break;
+      case "--git-branches":
+        gitBranches = true;
+        break;
+      case "-o": {
+        const value = argv[i + 1];
+        if (value === undefined || value === "" || value.startsWith("-")) {
+          return { ok: false, message: "-o requires an output directory" };
+        }
+        outDir = value;
+        i += 1;
+        break;
       }
-      outDir = value;
-      i += 1;
-    } else if (arg === "--budget") {
-      const value = args[i + 1];
-      if (value === undefined || !/^\d+$/.test(value)) {
-        console.error("evaluador: --budget requires a non-negative integer");
-        return EXIT_UNKNOWN_COMMAND;
+      case "--budget": {
+        const value = argv[i + 1];
+        if (value === undefined || !/^\d+$/.test(value)) {
+          return {
+            ok: false,
+            message: "--budget requires a non-negative integer",
+          };
+        }
+        budget = Number(value);
+        i += 1;
+        break;
       }
-      budgetOverride = Number(value);
-      i += 1;
-    } else {
-      positional.push(arg);
+      case "--roles": {
+        const value = argv[i + 1];
+        if (value === undefined || value === "" || value.startsWith("-")) {
+          return {
+            ok: false,
+            message: "--roles requires a comma-separated role list",
+          };
+        }
+        const resolved: RoleId[] = [];
+        for (const raw of value.split(",")) {
+          const name = raw.trim();
+          const role = resolveRole(name);
+          if (role === undefined) {
+            return { ok: false, message: `unknown role: ${name}` };
+          }
+          if (!resolved.includes(role)) resolved.push(role);
+        }
+        roles = resolved;
+        i += 1;
+        break;
+      }
+      default:
+        if (arg.startsWith("-")) {
+          return { ok: false, message: `unknown flag: ${arg}` };
+        }
+        positional.push(arg);
     }
   }
 
   const file = positional[0];
   if (file === undefined) {
-    console.error("evaluador: eval requires a report file path");
+    return { ok: false, message: "eval requires a report file path" };
+  }
+  if (positional.length > 1) {
+    return {
+      ok: false,
+      message: `unexpected extra argument: ${positional[1]}`,
+    };
+  }
+  return {
+    ok: true,
+    args: { file, outDir, noCache, gitBranches, budget, roles },
+  };
+}
+
+// eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b]
+// [--git-branches]: runs the structural gate and, when it passes, the
+// adversarial phases via runEval. The process exit code is runEval's own
+// (0/1), gate failure stays 2 (gaps JSON on stdout for the invoking model), and
+// an unreadable report or a malformed flag is a usage error (3). Issue
+// artifacts are written by runEval (Task 10); the four final outputs (Task 11)
+// land in `-o <dir>` or next to the report; `--git-branches` (off by default in
+// v1) additionally creates `problema/<claimId>` for blocking verdicts, with git
+// failures degraded to warnings. stdout stays reserved for the JSON status of a
+// gate failure.
+async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
+  const parsed = parseEvalArgs(args);
+  if (!parsed.ok) {
+    console.error(`evaluador: ${parsed.message}`);
     return EXIT_UNKNOWN_COMMAND;
   }
+  const { file, outDir, noCache, gitBranches, budget, roles } = parsed.args;
+
   try {
     readFileSync(file, "utf8"); // fail fast with the file-specific message
   } catch {
@@ -93,7 +180,8 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
       reportPath: file,
       outDir,
       noCache,
-      budget: budgetOverride ?? loadBudget(deps.cwd ?? process.cwd()),
+      roles,
+      budget: budget ?? loadBudget(deps.cwd ?? process.cwd()),
       driver: deps.driver ?? opencodeDriver(),
       cwd: deps.cwd ?? process.cwd(),
       timeoutMs: deps.timeoutMs,
@@ -145,13 +233,16 @@ function printUsage(): void {
     "",
     "Commands:",
     "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--git-branches]  Run the structural gate and adversarial review",
+    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--git-branches]  Run the structural gate and adversarial review",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));
 }
 
-// Parses the argument vector and returns the process exit code.
+// Parses the argument vector and returns the process exit code. The top-level
+// try/catch is the IO containment net (final-review fix): an unexpected throw
+// (e.g. EACCES while `init` scaffolds .evaluador/) becomes a clear stderr line
+// and exit 3, never an unhandled rejection with Node's own exit code.
 export async function main(
   argv: string[],
   deps: MainDeps = {},
@@ -159,19 +250,25 @@ export async function main(
   const args = argv.slice();
   const command = args.shift();
 
-  if (command === undefined || command === "--help" || command === "-h") {
-    printUsage();
-    return EXIT_OK;
-  }
+  try {
+    if (command === undefined || command === "--help" || command === "-h") {
+      printUsage();
+      return EXIT_OK;
+    }
 
-  switch (command) {
-    case "init":
-      return runInit(args);
-    case "eval":
-      return runEvalCommand(args, deps);
-    default:
-      console.error(`evaluador: unknown command: ${command}`);
-      return EXIT_UNKNOWN_COMMAND;
+    switch (command) {
+      case "init":
+        return await runInit(args);
+      case "eval":
+        return await runEvalCommand(args, deps);
+      default:
+        console.error(`evaluador: unknown command: ${command}`);
+        return EXIT_UNKNOWN_COMMAND;
+    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`evaluador: ${message}`);
+    return EXIT_UNKNOWN_COMMAND;
   }
 }
 

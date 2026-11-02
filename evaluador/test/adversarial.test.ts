@@ -474,6 +474,9 @@ describe("runEval", () => {
     expect(rc.verdicts.map((verdict) => verdict.role).sort()).toEqual(
       [...DEFAULT_ROLES].sort(),
     );
+    // The accumulated role set is the union, so issue derivation never loses
+    // the history of a role the subset run did not request.
+    expect(subset.state.roles).toEqual([...DEFAULT_ROLES]);
   });
 
   it("(f) budget 5 of 12: five calls, gap pairs marked presupuesto-agotado, code 1", async () => {
@@ -837,6 +840,65 @@ describe("cli eval wiring", () => {
 
     const code = await quietly(() =>
       main(["eval", session.reportPath, "--budget", "muchas"], {
+        driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    expect(code).toBe(3);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("--budget 0 pauses every pair with a declared gap and exit 1", async () => {
+    const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath, "--budget", "0"], {
+        driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    expect(code).toBe(1);
+    expect(calls).toHaveLength(0);
+    const paused = loadState(stateDir(session));
+    expect(paused).not.toBeNull();
+    if (paused === null) throw new Error("state.json should exist after the pause");
+    expect(gapPairs(paused, DEFAULT_ROLES)).toHaveLength(12);
+    for (const rc of paused.claims) {
+      expect(rc.recheck).toBe("presupuesto-agotado");
+      expect(rc.verdicts).toHaveLength(0);
+    }
+  });
+
+  it("--roles plumbs a resolved subset into runEval", async () => {
+    const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath, "--roles", "contador,falsificador"], {
+        driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toHaveLength(6); // 3 claims × the 2 requested roles
+    expect([...new Set(calls.map((call) => call.role))].sort()).toEqual([
+      "contadores",
+      "falsificador",
+    ]);
+    const state = loadState(stateDir(session));
+    expect(state?.roles).toEqual(["contadores", "falsificador"]);
+  });
+
+  it("--roles with an unknown name is exit 3 and never calls the driver", async () => {
+    const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath, "--roles", "noexiste"], {
         driver,
         cwd: session.cwd,
       }),

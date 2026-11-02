@@ -285,6 +285,12 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
 
   const cache = new VerdictCache(join(stateDir, CACHE_FILE));
   const claims: RecordedClaim[] = [];
+  // Roles accumulated in this state: a subset run (`--roles`) must not prune
+  // the history of roles it did not request, and issue derivation needs every
+  // role that has ever been in scope.
+  const stateRoles: RoleId[] = resumable
+    ? [...new Set<RoleId>([...(previous.roles ?? DEFAULT_ROLES), ...roles])]
+    : [...roles];
   const startPetitions = resumable ? previous.petitions : 0;
   let petitions = startPetitions;
   // Per-run cache accounting (Task 11): one unit per claim × role pair, so
@@ -432,7 +438,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     claims,
     petitions,
     updatedAt: new Date().toISOString(),
-    roles: [...roles],
+    roles: [...stateRoles],
   };
   saveState(stateDir, state);
   if (cacheDirty) cache.save();
