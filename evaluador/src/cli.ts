@@ -284,8 +284,17 @@ function tryRealPath(path: string): string | null {
 
 // When invoked as the installed binary, run main and propagate the exit code.
 // Both sides are resolved to real paths so a symlinked npm-bin invocation matches.
+// The outer try/catch is a second containment ring: main already maps expected
+// I/O failures to exit 3, and anything that escapes still becomes a clear
+// stderr line plus exit 3 (never Node's own unhandled-rejection exit code).
 const entryRealPath = process.argv[1] ? tryRealPath(process.argv[1]) : null;
 const moduleRealPath = tryRealPath(fileURLToPath(import.meta.url));
 if (entryRealPath !== null && entryRealPath === moduleRealPath) {
-  process.exitCode = await main(process.argv.slice(2));
+  try {
+    process.exitCode = await main(process.argv.slice(2));
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`evaluador: ${message}`);
+    process.exitCode = EXIT_UNKNOWN_COMMAND;
+  }
 }

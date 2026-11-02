@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, chmodSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -165,6 +165,25 @@ describe("cli via npm-bin symlink", () => {
       expect(res.status).toBe(0);
       expect(res.stderr).toBe("");
       expect(res.stdout).toMatch(/^Usage: evaluador/);
+    });
+
+    it("init en un directorio sin escritura ⇒ exit 3 con mensaje en stderr", () => {
+      // Root bypasses permission bits: the scenario is not reproducible there.
+      if (typeof process.getuid === "function" && process.getuid() === 0) return;
+
+      const parent = mkdtempSync(join(tmpdir(), "evaluador-unwritable-"));
+      chmodSync(parent, 0o500);
+      try {
+        const res = spawnSync(process.execPath, [binSymlink, "init"], {
+          cwd: parent,
+          encoding: "utf8",
+        });
+        expect(res.status).toBe(3);
+        expect(res.stderr).toMatch(/^evaluador: /);
+      } finally {
+        chmodSync(parent, 0o700);
+        rmSync(parent, { recursive: true, force: true });
+      }
     });
 
     afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
