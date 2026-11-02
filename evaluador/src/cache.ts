@@ -53,17 +53,24 @@ export class VerdictCache {
     writeFileSync(this.path, JSON.stringify(this.loaded(), null, 2) + "\n");
   }
 
-  // First access reads the file if it exists; an absent or unreadable cache
-  // is an empty store (a cache must never take orchestration down).
+  // First access reads the file if it exists; an absent, unreadable, corrupt
+  // or non-object cache (JSON.parse happily yields null / "5") is an empty
+  // store — a cache must never take orchestration down, and `get` must never
+  // throw.
   private loaded(): Store {
     if (this.store === null) {
-      let fresh: Store = {};
+      let fresh: unknown = {};
       try {
-        fresh = JSON.parse(readFileSync(this.path, "utf8")) as Store;
+        fresh = JSON.parse(readFileSync(this.path, "utf8"));
       } catch {
         // missing file, bad JSON, or a directory hit: start empty
       }
-      this.store = fresh;
+      // Validate after parse: only genuine objects are a store; null, arrays
+      // and scalars that JSON-parse cleanly do not count as one.
+      if (fresh === null || typeof fresh !== "object" || Array.isArray(fresh)) {
+        fresh = {};
+      }
+      this.store = fresh as Store;
     }
     return this.store;
   }

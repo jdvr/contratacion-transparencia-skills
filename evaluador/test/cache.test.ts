@@ -3,9 +3,9 @@
 // (a-c); (b) is the Review Focus #2 guard: the rubric version is part of
 // the hash payload, so a bump (rubricV1 → rubricV2) invalidates the cache.
 // Tempdirs are collected and removed EVERY time (no leaks, cf. Task 4).
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { canonicalJson, contentHash } from "../src/state.js";
 import { VerdictCache } from "../src/cache.js";
@@ -120,6 +120,30 @@ describe("VerdictCache", () => {
     const cache = new VerdictCache(path);
     expect(cache.get("deadbeef", "rol-inexistente" as never)).toBeUndefined();
     expect(existsSync(path)).toBe(false); // lazy: nothing is written on a bare get
+  });
+
+  it("corrupt-but-parseable file (content 'null') ⇒ empty store, get never throws", () => {
+    const path = join(newTempDir(), ".evaluador", "cache.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "null", "utf8"); // parses cleanly (not a JSON.parse throw)
+    const cache = new VerdictCache(path);
+    expect(() => cache.get("deadbeef", "contadores")).not.toThrow();
+    expect(cache.get("deadbeef", "contadores")).toBeUndefined();
+    // And the store is usable again: a put lands fresh and survives.
+    const hash = contentHash({ claim: makeClaim("claim-null"), rubricVersion: "rubricV1" });
+    const verdict = makeVerdict("claim-null", "contadores");
+    cache.put(hash, "contadores", verdict, "modelo-generado-de-prueba", "2026-11-02T00:00:00.000Z");
+    cache.save();
+    expect(new VerdictCache(path).get(hash, "contadores")).toEqual(verdict);
+  });
+
+  it("corrupt-but-parseable file (content '5') ⇒ empty store, get never throws", () => {
+    const path = join(newTempDir(), ".evaluador", "cache.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "5", "utf8");
+    const cache = new VerdictCache(path);
+    expect(() => cache.get("deadbeef", "metodico")).not.toThrow();
+    expect(cache.get("deadbeef", "metodico")).toBeUndefined();
   });
 });
 
