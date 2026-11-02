@@ -18,6 +18,13 @@ data from the sources you reviewed. They belong in your working directories,
 not in this public repository; the root `.gitignore` already excludes
 `.evaluador/`.
 
+## Adversarial roles — see ROLES.md for the role-by-role reference (Spanish)
+
+`ROLES.md` documents the four reviewers (counters, second source, falsifier,
+methodical): the checklist each one owns, the verdict each one owes, the
+`--roles` subset semantics and its interactions with budget, cache and issues.
+It is the readable summary of the prompts versioned in `src/rubric.ts`.
+
 ## Commands
 
 ```bash
@@ -31,7 +38,7 @@ node dist/cli.js init
 # Gate + adversarial review. Writes .evaluador/state.json, .evaluador/issues/,
 # and reporte-final.md/.html + evidencia.json + resumen.json next to the report
 # (or under -o <dir>):
-node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--git-branches]
+node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--git-branches]
 ```
 
 Exit codes:
