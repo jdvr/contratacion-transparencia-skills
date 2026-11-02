@@ -499,7 +499,9 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
       pendingSinReverificar: recheck === "sin-re-verificar",
       budgetGap: false,
       interrupted: false,
-      started: false,
+      // A claim with prior verdicts is already part of the state even if this
+      // run never pops one of its requested-role tasks (carried subset case).
+      started: (reusable?.verdicts.length ?? 0) > 0,
     };
   });
 
@@ -705,14 +707,15 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   }
   if (firstError !== undefined) throw firstError;
 
-  // Pairs the pool never launched: a signal interrupts the started claims; an
-  // exhausted budget declares the gap. Claims never reached stay out of state,
-  // exactly like the old sequential loop.
-  for (let i = cursor; i < tasks.length; i += 1) {
-    const acc = (tasks[i] as PairTask).acc;
-    if (!acc.started) continue;
-    if (runController.signal.aborted) acc.interrupted = true;
-    else acc.budgetGap = true;
+  // Pairs the pool never launched after a signal: mark the started claims as
+  // interrupted. Claims never reached stay out of state, exactly like the old
+  // sequential loop. (Without abort or firstError, the workers sweep every
+  // remaining task through the budget-gap branch above.)
+  if (runController.signal.aborted) {
+    for (let i = cursor; i < tasks.length; i += 1) {
+      const acc = (tasks[i] as PairTask).acc;
+      if (acc.started) acc.interrupted = true;
+    }
   }
   const interrupted = accs.some((acc) => acc.interrupted);
 
@@ -807,7 +810,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   writeOutputs(outDir, state, issues, runStats);
   const overshoot =
     spentThisRun > opts.budget
-      ? ` (+${spentThisRun - opts.budget} call(s) over budget from in-flight pairs)`
+      ? ` (+${spentThisRun - opts.budget} call(s) over budget)`
       : "";
   emit(
     `evaluador: done: exit ${code}, ${blockers} blocker(s), ` +

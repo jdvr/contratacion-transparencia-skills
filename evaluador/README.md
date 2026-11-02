@@ -38,7 +38,7 @@ node dist/cli.js init
 # Gate + adversarial review. Writes .evaluador/state.json, .evaluador/issues/,
 # and reporte-final.md/.html + evidencia.json + resumen.json next to the report
 # (or under -o <dir>):
-node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--model provider/model] [--timeout 300] [--jobs 4] [--git-branches]
+node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--model provider/model] [--timeout 300] [--jobs N] [--git-branches]
 ```
 
 Exit codes:

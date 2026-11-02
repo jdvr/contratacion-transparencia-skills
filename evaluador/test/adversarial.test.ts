@@ -1064,12 +1064,14 @@ describe("parallel scheduler", () => {
     expect(barrier.maxActive).toBe(4);
   });
 
-  it("serves a second parallel run entirely from cache", async () => {
+  it("serves a second parallel run entirely from the verdict cache", async () => {
     const session = newSession();
     const first = okDriver();
     await runEval(evalOpts(session, first.driver, { jobs: 4, heartbeatMs: 0 }));
     expect(first.calls).toHaveLength(12);
 
+    // Keep cache.json, drop state.json: the second run must hit cache.get.
+    rmSync(join(stateDir(session), "state.json"), { force: true });
     const second = okDriver();
     const result = await runEval(
       evalOpts(session, second.driver, { jobs: 4, heartbeatMs: 0 }),
@@ -1077,6 +1079,88 @@ describe("parallel scheduler", () => {
 
     expect(result.code).toBe(0);
     expect(second.calls).toHaveLength(0);
+  });
+
+  it("refuses an invalid embedded jobs value with code 3", async () => {
+    const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const result = await runEval(evalOpts(session, driver, { jobs: 0 }));
+
+    expect(result.code).toBe(3);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("clamps jobs to the number of pairs", async () => {
+    const session = newSession([baseClaim("claim-one")]);
+    const { driver, calls } = okDriver();
+
+    const result = await runEval(
+      evalOpts(session, driver, { roles: ["contadores"], jobs: 99, heartbeatMs: 0 }),
+    );
+
+    expect(result.code).toBe(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("includes jobs in the final summary", async () => {
+    const session = newSession([baseClaim("claim-one")]);
+    const lines: string[] = [];
+
+    const result = await runEval(
+      evalOpts(session, okDriver().driver, {
+        roles: ["contadores"],
+        jobs: 3,
+        logger: (line) => lines.push(line),
+        heartbeatMs: 0,
+      }),
+    );
+
+    expect(result.code).toBe(0);
+    expect(
+      lines.some((line) => line.includes("done: exit 0") && line.includes("jobs 3")),
+    ).toBe(true);
+  });
+
+  it("keeps carried non-requested verdicts when a subset run is interrupted", async () => {
+    const session = newSession();
+    await runEval(
+      evalOpts(session, okDriver().driver, {
+        roles: ["segunda-fuente"],
+        jobs: 1,
+        heartbeatMs: 0,
+      }),
+    );
+
+    let reached!: () => void;
+    const started = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const hanging: Driver = () => {
+      reached();
+      return new Promise<AgentResult>(() => {});
+    };
+    const pending = runEval(
+      evalOpts(session, hanging, {
+        roles: ["contadores"],
+        jobs: 1,
+        heartbeatMs: 0,
+      }),
+    );
+    await started;
+    process.emit("SIGINT", "SIGINT");
+    const paused = await pending;
+
+    expect(paused.code).toBe(1);
+    const saved = loadState(stateDir(session));
+    if (saved === null) throw new Error("state.json should exist after the pause");
+    expect(saved.claims).toHaveLength(3);
+    for (const recorded of saved.claims) {
+      expect(
+        recorded.verdicts.some((verdict) => verdict.role === "segunda-fuente"),
+      ).toBe(true);
+      expect(recorded.recheck).toBe("interrumpido");
+    }
   });
 
   it("budget is a soft cap: in-flight pairs finish, no new pair is launched", async () => {
@@ -1142,6 +1226,7 @@ describe("parallel scheduler", () => {
     const paused = await pending;
 
     expect(paused.code).toBe(1);
+    expect(calls).toBe(2); // no third call after the signal
     const saved = loadState(stateDir(session));
     if (saved === null) throw new Error("state.json should exist after the pause");
     expect(saved.claims).toHaveLength(1);
@@ -1182,6 +1267,7 @@ describe("parallel scheduler", () => {
     await started; // the second in-flight call exists before the checkpoint throw
     await expect(running).rejects.toThrow();
     expect(seenSignal?.aborted).toBe(true);
+    expect(calls).toBe(2); // the aborted worker launched no third call
   });
 
   it("produces the same state and issues regardless of completion order", async () => {
@@ -1213,15 +1299,10 @@ describe("parallel scheduler", () => {
       evalOpts(parallelSession, makeDriver(), { jobs: 4, heartbeatMs: 0 }),
     );
 
-    const shape = (state: EvaluatorState) =>
-      state.claims.map((recorded) => ({
-        id: recorded.claim.id,
-        recheck: recorded.recheck,
-        verdicts: recorded.verdicts.map((verdict) => ({
-          role: verdict.role,
-          hallazgo: verdict.hallazgo,
-        })),
-      }));
+    const shape = (state: EvaluatorState) => ({
+      ...state,
+      updatedAt: "same", // the only field that legitimately differs
+    });
     expect(shape(parallel.state)).toEqual(shape(sequential.state));
 
     const issues = (dir: string) =>
@@ -1302,6 +1383,27 @@ describe("cli eval wiring", () => {
     expect(paused).not.toBeNull();
     if (paused === null) throw new Error("state.json should exist after the pause");
     expect(gapPairs(paused, DEFAULT_ROLES)).toHaveLength(7);
+  });
+
+  it("the CLI default 4 keeps the soft budget cap and declares the gap", async () => {
+    const session = newSession();
+    const limited = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath, "--budget", "2"], {
+        driver: limited.driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    const calls = limited.calls.length;
+    expect(code).toBe(1);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(calls).toBeLessThanOrEqual(5); // budget 2 + jobs-1
+    const paused = loadState(stateDir(session));
+    expect(paused).not.toBeNull();
+    if (paused === null) throw new Error("state.json should exist after the pause");
+    expect(gapPairs(paused, DEFAULT_ROLES)).toHaveLength(12 - calls);
   });
 
   it("without a flag, a missing config fails open to the default 20", async () => {
