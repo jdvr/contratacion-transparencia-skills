@@ -149,7 +149,8 @@ check_skill() {
 #     existentes, para que un directorio sin SKILL.md no pase invisible.
 #     `evaluador/` es el harness binario del repo (no tiene SKILL.md): queda
 #     fuera de la validación de contenido por construcción y por `not_a_skill`,
-#     para que un futuro barrido más amplio no lo confunda con una skill. ---
+#     para que un futuro barrido más amplio no lo confunda con una skill. El
+#     nombre queda reservado: una skill real no puede llamarse `evaluador`. ---
 not_a_skill() {
   case "$1" in
     evaluador) return 0 ;;
