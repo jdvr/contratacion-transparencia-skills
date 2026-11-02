@@ -290,6 +290,70 @@ describe("runEval", () => {
     );
   });
 
+  it("the same --model reuses the cache on a second run", async () => {
+    const session = newSession();
+    const model = "opencode-go/deepseek-v4.1-flash";
+    const first = okDriver();
+    expect(
+      (await runEval({ ...evalOpts(session, first.driver), model })).code,
+    ).toBe(0);
+    expect(first.calls).toHaveLength(12);
+
+    const second = okDriver();
+    const result = await runEval({ ...evalOpts(session, second.driver), model });
+
+    expect(result.code).toBe(0);
+    expect(second.calls).toHaveLength(0); // same model: the cache serves it
+  });
+
+  it("changing --model invalidates the cache in both directions", async () => {
+    const model = "opencode-go/deepseek-v4.1-flash";
+
+    // default → --model: every claim/role pair is re-driven.
+    const fromDefault = newSession();
+    await runEval(evalOpts(fromDefault, okDriver().driver));
+    const switched = okDriver();
+    expect(
+      (await runEval({ ...evalOpts(fromDefault, switched.driver), model })).code,
+    ).toBe(0);
+    expect(switched.calls).toHaveLength(12);
+
+    // --model → default: the model-bearing verdicts do not serve the default run.
+    const fromModel = newSession();
+    await runEval({ ...evalOpts(fromModel, okDriver().driver), model });
+    const back = okDriver();
+    expect((await runEval(evalOpts(fromModel, back.driver))).code).toBe(0);
+    expect(back.calls).toHaveLength(12);
+  });
+
+  it("treats a state with the pre-model hash composition as stale", async () => {
+    const session = newSession();
+    await runEval(evalOpts(session, okDriver().driver));
+
+    // Simulate an older state: `hash` = contentHash({claim, rubricVersion}),
+    // the composition before the model label joined it. Dropping the cache
+    // leaves the state hash as the only possible source of a cache hit.
+    const state = loadState(stateDir(session));
+    if (state === null) throw new Error("state.json should exist");
+    saveState(stateDir(session), {
+      ...state,
+      claims: state.claims.map((recorded) => ({
+        ...recorded,
+        hash: contentHash({
+          claim: recorded.claim,
+          rubricVersion: RUBRIC_VERSION,
+        }),
+      })),
+    });
+    rmSync(join(stateDir(session), "cache.json"));
+
+    const { driver, calls } = okDriver();
+    const result = await runEval(evalOpts(session, driver));
+
+    expect(result.code).toBe(0);
+    expect(calls).toHaveLength(12); // hash mismatch ⇒ every pair re-driven
+  });
+
   it("(c) changing one claim body re-reviews only that claim (4 calls)", async () => {
     const session = newSession();
     const first = await runEval(evalOpts(session, okDriver().driver));

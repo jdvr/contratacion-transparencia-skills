@@ -77,6 +77,10 @@ export interface RecordedClaim {
 // claims list (document order included), so any claim edit/reorder/add/remove
 // changes it; `petitions` accumulates the driver `calls` spent under this state
 // (honest accounting across resumed runs).
+// Changes to the claim, the rubric version or the reviewer model label all
+// change `hash`, so a verdict produced by model A is never adopted as model B's;
+// older states (hashes computed before the model label joined the composition)
+// are stale by design and their pairs are re-driven. No migration is attempted.
 export interface EvaluatorState {
   version: 1;
   reporte: string;
@@ -89,6 +93,17 @@ export interface EvaluatorState {
   // for roles it never asked the driver to review. Optional for states written
   // before Task 10 / by hand; absent means the default role set.
   roles?: RoleId[];
+}
+
+// Claim identity for both the resumable state and the verdict cache. The
+// reviewer model label is part of it (not just a recorded label): switching
+// `--model` must yield fresh reviews, while the same model keeps the cache warm.
+function claimHash(claim: Claim, model: string | undefined): string {
+  return contentHash({
+    claim,
+    rubricVersion: RUBRIC_VERSION,
+    modelLabel: modelLabel(model),
+  });
 }
 
 // Per-call driver budget in milliseconds (Task 5 carry). Injectable via
@@ -267,6 +282,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         reportHash,
         roles,
         new Date().toISOString(),
+        opts.model,
       ),
       budget: opts.budget,
       spentThisRun: 0,
@@ -285,6 +301,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         reportHash,
         roles,
         new Date().toISOString(),
+        opts.model,
       ),
       budget: opts.budget,
       spentThisRun: 0,
@@ -366,7 +383,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         interrupted = true;
         break;
       }
-      const hash = contentHash({ claim, rubricVersion: RUBRIC_VERSION });
+      const hash = claimHash(claim, opts.model);
       const recorded = previousById.get(claim.id);
       const reusable =
         resumable && recorded !== undefined && recorded.hash === hash
@@ -699,11 +716,13 @@ function failureVerdict(role: string, hallazgo: string): Verdict {
 }
 
 // Fresh in-memory state (no verdicts) used for the gate-failure snapshot.
+// `hash` uses the same model-aware composition as the resumable path.
 function freshState(
   claims: Claim[],
   reporte: string,
   roles: RoleId[],
   updatedAt: string,
+  model: string | undefined,
 ): EvaluatorState {
   return {
     version: 1,
@@ -711,7 +730,7 @@ function freshState(
     rubricVersion: RUBRIC_VERSION,
     claims: claims.map((claim) => ({
       claim,
-      hash: contentHash({ claim, rubricVersion: RUBRIC_VERSION }),
+      hash: claimHash(claim, model),
       verdicts: [],
     })),
     petitions: 0,

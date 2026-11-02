@@ -56,6 +56,8 @@ HTTP requests to public portals; `resumen.json` reports the cumulative count
 
 `--model provider/model` is passed verbatim to `opencode run` and applies to all
 reviewer roles in that run; without the flag, opencode's default model is used.
+The reviewer model is part of the cache key: changing `--model` re-reviews
+claims (or pass `--no-cache` to force a full re-run).
 
 ## Build and host
 
