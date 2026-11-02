@@ -1,0 +1,156 @@
+// v1 driver: runs one `opencode run <prompt>` subprocess per call and extracts
+// a structured Verdict from its stdout. The driver NEVER throws: every failure
+// mode (spawn error, non-zero exit, unparseable/invalid output after the single
+// retry) degrades to a Verdict with resultado "sin-re-verificar" and severity
+// "bloqueante" (see docs/superpowers/specs/2026-10-31-evaluador-design.md).
+import { spawn } from "node:child_process";
+import type {
+  AgentCall,
+  AgentResult,
+  Driver,
+  SpawnFn,
+  Verdict,
+} from "./types.js";
+
+// Injected when allowFetch is empty (allowlist lives in Task 6).
+const NO_FETCH_PHRASE = "No hagas fetch: marca resultado sin-re-verificar";
+// Appended on the single retry for unparseable/invalid output.
+const RETRY_SUFFIX = "SOLO JSON, sin texto fuera del bloque";
+const VERDICT_SCHEMA =
+  '{"claimId": string, "role": string, "resultado": "ok" | "problema" | ' +
+  '"sin-re-verificar", "severidad": "aviso" | "bloqueante", ' +
+  '"hallazgo": string, "evidencia": string[]}';
+
+// Canonical failure verdict (behavior 3, and every other failure mode).
+// claimId stays empty (the driver never saw one); the hallazgo is the exact
+// machine-parseable string from the brief, evidencia empty for uniform shape.
+function failureVerdict(call: AgentCall): Verdict {
+  return {
+    claimId: "",
+    role: call.role,
+    resultado: "sin-re-verificar",
+    severidad: "bloqueante",
+    hallazgo: "driver no devolvió veredicto estructurado",
+    evidencia: [],
+  };
+}
+
+// Prompt = rubric + material + the JSON-only schema instruction, with the
+// no-fetch phrase when the allowlist is empty (or the resolved allowlist
+// otherwise), plus the retry suffix on the second attempt.
+function buildPrompt(call: AgentCall, retry: boolean): string {
+  const parts = [
+    call.rubric,
+    call.material,
+    `Responde SOLO con un objeto JSON que cumpla el schema Verdict: ${VERDICT_SCHEMA}`,
+  ];
+  if (call.allowFetch.length === 0) {
+    parts.push(NO_FETCH_PHRASE);
+  } else {
+    parts.push(`Puedes hacer fetch únicamente a: ${call.allowFetch.join(", ")}`);
+  }
+  if (retry) parts.push(RETRY_SUFFIX);
+  return parts.join("\n\n");
+}
+
+// Fenced ```json blocks, tolerating trailing spaces and CRLF on the fences.
+const FENCED_JSON = /```json[ \t]*\r?\n([\s\S]*?)\r?\n?[ \t]*```/g;
+
+// Returns the LAST fenced ```json block's content on stdout, or undefined.
+function lastFencedJson(stdout: string): string | undefined {
+  let last: string | undefined;
+  for (const match of stdout.matchAll(FENCED_JSON)) last = match[1] ?? "";
+  return last;
+}
+
+const RESULTADOS = new Set(["ok", "problema", "sin-re-verificar"]);
+const SEVERIDADES = new Set(["aviso", "bloqueante"]);
+
+// Manual field validation of Verdict (no ajv, no schema lib): every required
+// field present with the right primitive type / literal value. A `role` that
+// differs from call.role is still valid here; behavior 4 overwrites it with
+// `call.role` below, so the verdict's role is never the agent's to decide.
+function parseVerdict(json: string, role: string): Verdict | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.claimId !== "string") return undefined;
+  if (typeof record.role !== "string") return undefined;
+  if (typeof record.resultado !== "string" || !RESULTADOS.has(record.resultado)) {
+    return undefined;
+  }
+  if (typeof record.severidad !== "string" || !SEVERIDADES.has(record.severidad)) {
+    return undefined;
+  }
+  if (typeof record.hallazgo !== "string") return undefined;
+  const evidencia = record.evidencia;
+  if (!Array.isArray(evidencia)) return undefined;
+  if (evidencia.some((item) => typeof item !== "string")) return undefined;
+
+  const verdict: Verdict = {
+    claimId: record.claimId,
+    role: record.role,
+    resultado: record.resultado as Verdict["resultado"],
+    severidad: record.severidad as Verdict["severidad"],
+    hallazgo: record.hallazgo,
+    evidencia: evidencia as string[],
+  };
+  // Behavior 4: the returned role is never trusted over the call's role.
+  verdict.role = role;
+  return verdict;
+}
+
+// Primary implementation: real `opencode run <prompt>` subprocess via
+// node:child_process. Spawn errors reject; the driver catches them above.
+const defaultRunProcess: SpawnFn = (cmd, args) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code) => resolve({ stdout, code: code ?? 1 }));
+  });
+
+// Attempts: 1 normal, at most 1 retry when the output can't be parsed/validated
+// (behavior 3). Spawn failures (rejected runProcess or non-zero exit) do not
+// retry: retries exist only for polluted stdout, and `calls` always matches
+// real spawns exactly.
+export function opencodeDriver(
+  cmd: string = "opencode",
+  runProcess: SpawnFn = defaultRunProcess,
+): Driver {
+  return async (call: AgentCall): Promise<AgentResult> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // `calls` counts every real runProcess invocation, so it is one per
+      // attempt (1 normal, 2 with the single retry) — exact for the Budget.
+      let stdout: string;
+      let code: number;
+      try {
+        ({ stdout, code } = await runProcess(cmd, [
+          "run",
+          buildPrompt(call, attempt > 0),
+        ]));
+      } catch {
+        return { verdicts: [failureVerdict(call)], calls: 1 };
+      }
+      if (code !== 0) {
+        return { verdicts: [failureVerdict(call)], calls: 1 };
+      }
+      const json = lastFencedJson(stdout);
+      if (json !== undefined) {
+        const verdict = parseVerdict(json, call.role);
+        if (verdict !== undefined) return { verdicts: [verdict], calls: attempt + 1 };
+      }
+    }
+    return { verdicts: [failureVerdict(call)], calls: 2 };
+  };
+}
