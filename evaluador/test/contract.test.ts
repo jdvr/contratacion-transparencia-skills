@@ -147,4 +147,32 @@ describe("parseClaims resilience", () => {
     expect(claims).toHaveLength(0);
     expect(parseErrors).toEqual([]);
   });
+
+  it("id presente pero no string => parseErrors (fail closed)", () => {
+    const md = [
+      "```json",
+      JSON.stringify({ ...fixtureClaims[0], id: 42 }),
+      "```",
+      "```json",
+      JSON.stringify({ ...fixtureClaims[1], id: null }),
+      "```",
+    ].join("\n");
+    const { claims, parseErrors } = parseClaims(md);
+    expect(claims).toHaveLength(0);
+    expect(parseErrors).toHaveLength(2);
+    for (const error of parseErrors) {
+      expect(error).toMatch(/claim with non-string id/);
+    }
+  });
+
+  it("un fence ```json sin cierre => parseErrors (nunca ignorado)", () => {
+    const md = [
+      "```json",
+      JSON.stringify({ ...fixtureClaims[0], id: "sin-cierre" }),
+      "texto que ya no está dentro de un bloque cerrado",
+    ].join("\n");
+    const { claims, parseErrors } = parseClaims(md);
+    expect(claims).toHaveLength(0);
+    expect(parseErrors).toContain("unterminated json fence");
+  });
 });

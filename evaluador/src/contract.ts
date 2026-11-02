@@ -49,9 +49,11 @@ export function parseClaims(md: string): ParseResult {
   const seenIds = new Set<string>();
 
   let index = 0; // 1-based, counts ```json fences (valid or not) in order
+  let matched = 0;
   for (const match of md.matchAll(FENCED_JSON)) {
     const content = match[1] ?? "";
     index += 1;
+    matched += 1;
 
     let parsed: unknown;
     try {
@@ -62,6 +64,17 @@ export function parseClaims(md: string): ParseResult {
       continue;
     }
 
+    // Fail closed on an attempt at a claim: an "id" key of any non-string type
+    // is a broken claim, not prose to skip. Blocks with no "id" stay silent
+    // (documented Task 2 behavior: ancillary JSON annexes are not claims).
+    if (
+      isRecord(parsed) &&
+      Object.hasOwn(parsed, "id") &&
+      typeof parsed.id !== "string"
+    ) {
+      parseErrors.push(`fence json #${index}: claim with non-string id`);
+      continue;
+    }
     if (!isRecord(parsed) || typeof parsed.id !== "string") {
       continue; // not a claim-shaped object; not an error
     }
@@ -81,6 +94,14 @@ export function parseClaims(md: string): ParseResult {
     seenIds.add(id);
 
     claims.push(parsed as unknown as Claim);
+  }
+
+  // A ```json opener without a later closing fence is a broken report, never
+  // silently ignored: the regex only matches terminated blocks, so any opener
+  // left over is unterminated (fail closed).
+  const openers = [...md.matchAll(/```json[ \t]*(?:\r?\n|$)/g)].length;
+  for (let i = matched; i < openers; i += 1) {
+    parseErrors.push("unterminated json fence");
   }
 
   return { claims, parseErrors };
