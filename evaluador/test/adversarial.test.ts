@@ -101,6 +101,38 @@ function okDriver(): { driver: Driver; calls: AgentCall[] } {
   return countingDriver((call) => ({ verdicts: [okVerdict(call)], calls: 1 }));
 }
 
+// Releases once `expected` calls are simultaneously in flight, then lets every
+// later call through. The observed maximum proves the pool bound.
+function barrierDriver(expected: number): {
+  driver: Driver;
+  calls: AgentCall[];
+  readonly maxActive: number;
+} {
+  let active = 0;
+  let maxActive = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const calls: AgentCall[] = [];
+  const driver: Driver = async (call) => {
+    calls.push(call);
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    if (active === expected) release();
+    await gate;
+    active -= 1;
+    return { verdicts: [okVerdict(call)], calls: 1 };
+  };
+  return {
+    driver,
+    calls,
+    get maxActive() {
+      return maxActive;
+    },
+  };
+}
+
 // ── tempdir sessions ──────────────────────────────────────────────────────
 
 const tempRoots = new Set<string>();
@@ -983,6 +1015,120 @@ describe("rubric and driver schema agree", () => {
   });
 });
 
+// ── parallel scheduler ────────────────────────────────────────────────────
+
+describe("parallel scheduler", () => {
+  it("runs up to jobs claim×role pairs concurrently", async () => {
+    const session = newSession(); // 3 claims × 4 roles = 12 pairs
+    const barrier = barrierDriver(3);
+    const lines: string[] = [];
+
+    const result = await runEval(
+      evalOpts(session, barrier.driver, {
+        jobs: 3,
+        logger: (line) => lines.push(line),
+        heartbeatMs: 0,
+      }),
+    );
+
+    expect(result.code).toBe(0);
+    expect(barrier.calls).toHaveLength(12);
+    expect(barrier.maxActive).toBe(3);
+    expect(lines[0]).toContain("jobs: 3");
+  });
+
+  it("jobs: 1 keeps the sequential concurrency ceiling", async () => {
+    const session = newSession();
+    const barrier = barrierDriver(1);
+
+    const result = await runEval(
+      evalOpts(session, barrier.driver, { jobs: 1, heartbeatMs: 0 }),
+    );
+
+    expect(result.code).toBe(0);
+    expect(barrier.maxActive).toBe(1);
+  });
+
+  it("the CLI defaults to 4 workers", async () => {
+    const session = newSession();
+    const barrier = barrierDriver(4);
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath], {
+        driver: barrier.driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    expect(code).toBe(0);
+    expect(barrier.maxActive).toBe(4);
+  });
+
+  it("serves a second parallel run entirely from cache", async () => {
+    const session = newSession();
+    const first = okDriver();
+    await runEval(evalOpts(session, first.driver, { jobs: 4, heartbeatMs: 0 }));
+    expect(first.calls).toHaveLength(12);
+
+    const second = okDriver();
+    const result = await runEval(
+      evalOpts(session, second.driver, { jobs: 4, heartbeatMs: 0 }),
+    );
+
+    expect(result.code).toBe(0);
+    expect(second.calls).toHaveLength(0);
+  });
+
+  it("produces the same state and issues regardless of completion order", async () => {
+    const makeDriver = (): Driver => async (call) => {
+      // Different delays force out-of-order completions under jobs: 4.
+      const delay =
+        call.role === "contadores" ? 8 : call.role === "segunda-fuente" ? 4 : 1;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      const id = /"id": "([^"]+)"/.exec(call.material)?.[1] ?? "?";
+      const isProblem = call.role === "falsificador";
+      return {
+        verdicts: [
+          okVerdict(call, {
+            resultado: isProblem ? "problema" : "ok",
+            severidad: "aviso",
+            hallazgo: `${id}/${call.role}`,
+          }),
+        ],
+        calls: 1,
+      };
+    };
+    const sequentialSession = newSession();
+    const parallelSession = newSession();
+
+    const sequential = await runEval(
+      evalOpts(sequentialSession, makeDriver(), { jobs: 1, heartbeatMs: 0 }),
+    );
+    const parallel = await runEval(
+      evalOpts(parallelSession, makeDriver(), { jobs: 4, heartbeatMs: 0 }),
+    );
+
+    const shape = (state: EvaluatorState) =>
+      state.claims.map((recorded) => ({
+        id: recorded.claim.id,
+        recheck: recorded.recheck,
+        verdicts: recorded.verdicts.map((verdict) => ({
+          role: verdict.role,
+          hallazgo: verdict.hallazgo,
+        })),
+      }));
+    expect(shape(parallel.state)).toEqual(shape(sequential.state));
+
+    const issues = (dir: string) =>
+      readdirSync(join(dir, ".evaluador", "issues"))
+        .sort()
+        .map((file) =>
+          JSON.parse(readFileSync(join(dir, ".evaluador", "issues", file), "utf8")),
+        );
+    expect(issues(parallelSession.cwd)).toEqual(issues(sequentialSession.cwd));
+  });
+});
+
 // ── CLI wiring ────────────────────────────────────────────────────────────
 
 describe("cli eval wiring", () => {
@@ -1039,7 +1185,7 @@ describe("cli eval wiring", () => {
     const limited = okDriver();
 
     const code = await quietly(() =>
-      main(["eval", session.reportPath, "--budget", "5"], {
+      main(["eval", session.reportPath, "--budget", "5", "--jobs", "1"], {
         driver: limited.driver,
         cwd: session.cwd,
       }),
@@ -1073,7 +1219,10 @@ describe("cli eval wiring", () => {
 
     const { driver, calls } = okDriver();
     const code = await quietly(() =>
-      main(["eval", session.reportPath], { driver, cwd: session.cwd }),
+      main(["eval", session.reportPath, "--jobs", "1"], {
+        driver,
+        cwd: session.cwd,
+      }),
     );
 
     expect(code).toBe(1);
