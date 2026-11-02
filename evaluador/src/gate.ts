@@ -155,5 +155,15 @@ export function runGate(md: string): GateResult {
   const { claims, parseErrors } = parseClaims(md);
   const gaps: Gap[] = parseErrors.map(gapFromParseError);
   for (const claim of claims) checkClaim(claim, gaps);
+  // Whole-report check, kept simple by design: gap order is parse-error gaps
+  // first, then per-claim field gaps in document order, and — only when the
+  // report has zero claims — the zero-claims gap LAST (spec fallback: with
+  // nothing to evaluate the entry gate fails, a correct close needs claims).
+  if (claims.length === 0) {
+    gaps.push({
+      campo: "claims",
+      razon: "el reporte no contiene ninguna afirmación evaluada",
+    });
+  }
   return { ok: gaps.length === 0, gaps, claims };
 }

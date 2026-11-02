@@ -230,11 +230,23 @@ describe("gate on the untouched generated fixture", () => {
     expect(claims).toHaveLength(3);
   });
 
-  it("empty report parses as zero claims and passes the gate", () => {
+  it("a report with zero claims FAILS the gate (spec fallback: nothing to evaluate)", () => {
     const { ok, gaps, claims } = runGate("");
-    expect(ok).toBe(true);
-    expect(gaps).toEqual([]);
+    expect(ok).toBe(false);
     expect(claims).toHaveLength(0);
+    expect(gaps).toEqual([
+      { campo: "claims", razon: "el reporte no contiene ninguna afirmación evaluada" },
+    ]);
+  });
+
+  it("zero claims plus parse errors: parse gaps first, then the zero-claims gap", () => {
+    const { ok, gaps, claims } = runGate("```json\n{ id: not valid JSON }\n```");
+    expect(ok).toBe(false);
+    expect(claims).toHaveLength(0);
+    expect(gaps).toEqual([
+      expect.objectContaining({ campo: "parse" }),
+      { campo: "claims", razon: "el reporte no contiene ninguna afirmación evaluada" },
+    ]);
   });
 });
 
@@ -303,5 +315,19 @@ describe("cli eval wiring", () => {
   it("eval without a file argument => exit 3 (usage)", async () => {
     const { code } = await runCapturingEval(["eval"]);
     expect(code).toBe(3);
+  });
+
+  it("empty report (zero claims) => exit 2 with the zero-claims gap JSON", async () => {
+    const path = tmpReport("vacio.md", "REPORTE (DATOS GENERADOS) sin bloques json");
+    const { code, stdoutLines } = await runCapturingEval(["eval", path]);
+    expect(code).toBe(2);
+    const out = jsonOut(stdoutLines);
+    expect(out).toEqual({
+      ok: false,
+      gaps: [
+        { campo: "claims", razon: "el reporte no contiene ninguna afirmación evaluada" },
+      ],
+      claims: 0,
+    });
   });
 });
