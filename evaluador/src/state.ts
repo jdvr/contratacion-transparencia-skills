@@ -63,7 +63,7 @@ export function writeFileAtomic(path: string, data: string): void {
 
 // Content hash: sha256 over the canonical JSON, lowercase hex. The exact
 // payload shape is up to the caller (orchestration calls it as
-// `contentHash({ claim, rubricVersion })`).
+// `contentHash({ claim, rubricVersion, modelLabel })`).
 export function contentHash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }

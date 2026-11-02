@@ -41,7 +41,7 @@ Semántica de subset:
 
 - Solo se conduce al driver el subconjunto pedido. Los veredictos previos de los demás roles **se conservan intactos** (no se podan) y `state.roles` acumula la unión: pasar de un subset a otro no pierde revisiones, siempre que el hash del claim no cambie (mismo `--model` y mismo claim de reporte); al cambiar de modelo, los veredictos previos dejan de ser válidos (los produce otro modelo) y solo se re-conducen los roles pedidos en esta ejecución.
 - Los pares ya revisados se adoptan desde state/caché (sin gastar una llamada al driver) salvo `--no-cache`. Los pares **nunca revisados** y los que quedaron en `sin-re-verificar` son los únicos que se re-conducen.
-- Los issues se derivan de `state.roles` (la unión acumulada) y de todos los veredictos conservados: un subset no revisa pares nuevos de otros roles, pero re-emite sus issues previos. Para una salida con solo lo que corriste, borra `.evaluador/` o revisa los cuatro roles.
+- Los issues se derivan de `state.roles` (la unión acumulada) y de todos los veredictos conservados: un subset no revisa pares nuevos de otros roles, pero re-emite **los issues de los veredictos conservados** (no los de huecos de roles no pedidos en esta ejecución). Para una salida con solo lo que corriste, borra `.evaluador/` o revisa los cuatro roles.
 - Cuándo **no** usarlo: para una auditoría o una decisión de cierre, deja los cuatro. Un `exit 0` con subset solo certifica los roles que corriste; la cobertura adversarial completa son los cuatro roles (o un estado acumulado que ya los tenga).
 
 ## Interacciones
