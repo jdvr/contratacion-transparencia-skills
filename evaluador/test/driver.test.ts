@@ -2,8 +2,14 @@
 // seam ONLY (no real `opencode` binary, no network, no filesystem). Each fake
 // `runProcess` scripts the stdout segments it returns and records every spawn
 // (cmd + args) so tests can assert on prompt contents and spawn counts.
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { opencodeDriver } from "../src/driver/opencode.js";
+import {
+  defaultRunProcess,
+  opencodeDriver,
+} from "../src/driver/opencode.js";
 import type { AgentCall, SpawnFn } from "../src/driver/types.js";
 
 const NO_FETCH_PHRASE = "No hagas fetch: marca resultado sin-re-verificar";
@@ -59,6 +65,35 @@ function verdictJson(overrides: Record<string, unknown> = {}): string {
 
 function fenced(text: string): string {
   return "```json\n" + text + "\n```";
+}
+
+// Polling helpers for the real-subprocess abort test (fast, hermetic).
+async function waitFor<T>(probe: () => T | undefined): Promise<T> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    const value = probe();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("condition not met within 2 s");
+}
+
+function readPid(path: string): number | undefined {
+  try {
+    const pid = Number.parseInt(readFileSync(path, "utf8"), 10);
+    return Number.isNaN(pid) ? undefined : pid;
+  } catch {
+    return undefined;
+  }
+}
+
+function isDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false; // still alive
+  } catch {
+    return true; // ESRCH: gone
+  }
 }
 
 describe("opencode driver", () => {
@@ -175,5 +210,54 @@ describe("opencode driver", () => {
     const { run, calls } = scriptedRun([{ stdout: verdictJson(), code: 0 }]);
     await opencodeDriver("mi-opencode-build", run)(baseCall);
     expect(calls[0]?.cmd).toBe("mi-opencode-build");
+  });
+
+  it("(i) abort kills the real spawned child and resolves the process promise", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "evaluador-driver-abort-"));
+    const pidFile = join(dir, "pid");
+    const controller = new AbortController();
+    let pid: number | undefined;
+
+    try {
+      const pending = defaultRunProcess(
+        process.execPath,
+        [
+          "-e",
+          // Write our pid, then hang: only the abort path can end it.
+          'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);',
+          pidFile,
+        ],
+        controller.signal,
+      );
+      pid = await waitFor(() => readPid(pidFile));
+
+      controller.abort();
+      const result = await pending; // kill closes stdio: no hang, no orphan
+
+      expect(result.code).not.toBe(0);
+      await waitFor(() => (isDead(pid as number) ? true : undefined));
+      expect(isDead(pid)).toBe(true);
+    } finally {
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already dead
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(j) an already-aborted signal kills the child immediately", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await defaultRunProcess(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      controller.signal,
+    );
+    expect(result.code).not.toBe(0);
   });
 });

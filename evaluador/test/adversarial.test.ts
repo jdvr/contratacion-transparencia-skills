@@ -3,7 +3,7 @@
 // `opencode` binary, no network, no subprocess — and every tempdir is removed
 // in `afterAll`. Fixtures are generated (fictitious) and pass the structural
 // gate, so each scenario exercises orchestration, not the gate's rejections.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -208,6 +208,31 @@ describe("runEval", () => {
     expect(second.state.petitions).toBe(12); // nothing spent this run
   });
 
+  it("adopts cache hits after state.json is deleted (0 driver calls, code 0)", async () => {
+    const session = newSession();
+    const first = await runEval(evalOpts(session, okDriver().driver));
+    expect(first.code).toBe(0);
+
+    // The full run wrote both artifacts: the cache records the honest model.
+    const cachePath = join(stateDir(session), "cache.json");
+    const stored = JSON.parse(readFileSync(cachePath, "utf8")) as Record<
+      string,
+      Record<string, { verdict: Verdict; model: string; updatedAt: string }>
+    >;
+    const firstHash = first.state.claims[0]?.hash ?? "";
+    expect(stored[firstHash]?.contadores?.model).toBe("opencode-run(v1)");
+
+    // Removing the resumable state leaves the content-addressed cache as the
+    // only source: every claim/role must be adopted from it.
+    rmSync(join(stateDir(session), "state.json"));
+    const { driver, calls } = okDriver();
+    const second = await runEval(evalOpts(session, driver));
+
+    expect(calls).toHaveLength(0);
+    expect(second.code).toBe(0);
+    expect(second.state.claims.map((rc) => rc.verdicts.length)).toEqual([4, 4, 4]);
+  });
+
   it("(c) changing one claim body re-reviews only that claim (4 calls)", async () => {
     const session = newSession();
     const first = await runEval(evalOpts(session, okDriver().driver));
@@ -343,8 +368,10 @@ describe("runEval", () => {
   it("driver timeout ⇒ declared sin-re-verificar verdict, code 1, never throws", async () => {
     const session = newSession([baseClaim("claim-timeout")]);
     let calls = 0;
-    const never: Driver = () => {
+    let seenSignal: AbortSignal | undefined;
+    const never: Driver = (call) => {
       calls += 1;
+      seenSignal = call.signal;
       return new Promise<AgentResult>(() => {});
     };
 
@@ -357,6 +384,7 @@ describe("runEval", () => {
     expect(calls).toBe(1);
     expect(result.code).toBe(1);
     expect(DRIVER_TIMEOUT_MS).toBe(300_000);
+    expect(seenSignal?.aborted).toBe(true); // timeout aborted the driver call
     const rc = recordedClaim(result.state, "claim-timeout");
     expect(rc.recheck).toBe("sin-re-verificar");
     expect(rc.verdicts).toEqual([
@@ -365,10 +393,23 @@ describe("runEval", () => {
         role: "contadores",
         resultado: "sin-re-verificar",
         severidad: "bloqueante",
-        hallazgo: "driver timeout (without response in 300 s)",
+        // The default 300_000 ms still renders the pinned "300 s" wording;
+        // the injected 20 ms is reported as its real 0.02 s budget.
+        hallazgo: "driver timeout (without response in 0.02 s)",
         evidencia: [],
       },
     ]);
+  });
+
+  it("empty roles list ⇒ code 3, no state written, driver never called", async () => {
+    const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const result = await runEval({ ...evalOpts(session, driver), roles: [] });
+
+    expect(result.code).toBe(3);
+    expect(calls).toHaveLength(0);
+    expect(loadState(stateDir(session))).toBeNull();
   });
 });
 

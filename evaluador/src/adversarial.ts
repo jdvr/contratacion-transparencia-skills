@@ -9,7 +9,8 @@
 //   1 — any blocking verdict (or a dishonest label, which the gate already
 //       rejects before we get here);
 //   2 — structural gate failed (machine-readable gaps; state is NOT written);
-//   3 — CLI usage / unreadable report (raised by the CLI, not here).
+//   3 — usage-level: empty roles list (no state written) or an unreadable
+//       report raised by the CLI.
 //
 // A driver call is bounded by DRIVER_TIMEOUT_MS (default 300 s). A timeout is
 // treated exactly like a driver failure: it becomes an issue-able
@@ -59,8 +60,11 @@ export const DRIVER_TIMEOUT_MS = 300_000;
 // which model `opencode run` selected, so it records what it actually did.
 export const CACHE_MODEL = "opencode-run(v1)";
 
-// Canonical hallazgo for a timed-out call (binding ruling, exact string).
-const TIMEOUT_HALLAZGO = "driver timeout (without response in 300 s)";
+// Canonical hallazgo for a timed-out call. Reports the actual configured
+// budget: the default 300_000 ms renders the pinned "300 s" wording.
+function timeoutHallazgo(timeoutMs: number): string {
+  return `driver timeout (without response in ${timeoutMs / 1000} s)`;
+}
 
 const STATE_FILE = "state.json";
 const CACHE_FILE = "cache.json";
@@ -161,7 +165,7 @@ export interface RunEvalOptions {
 }
 
 export interface RunEvalResult {
-  code: 0 | 1 | 2;
+  code: 0 | 1 | 2 | 3;
   gaps?: Gap[];
   state: EvaluatorState;
 }
@@ -184,6 +188,15 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     return {
       code: 2,
       gaps: gate.gaps,
+      state: freshState(gate.claims, reportHash, new Date().toISOString()),
+    };
+  }
+
+  // Usage-level guard: an empty roles list requests no review at all. Refuse
+  // it explicitly (exit 3, no state write) instead of returning a vacuous 0.
+  if (roles.length === 0) {
+    return {
+      code: 3,
       state: freshState(gate.claims, reportHash, new Date().toISOString()),
     };
   }
@@ -311,28 +324,36 @@ function materialFor(claim: Claim): string {
   return `Claim under review (JSON):\n\n${JSON.stringify(claim, null, 2)}`;
 }
 
-// Runs one driver call under a hard timeout. The driver contract says it never
-// throws, but a rejection is still contained here (as a declared failure) so an
+// Runs one driver call under a hard timeout. At the deadline the call's
+// AbortSignal fires, so the real driver kills its child: the call is abandoned
+// and the timeout verdict is final (no orphan subprocess keeps the CLI alive).
+// A rejection is likewise contained here as a declared failure, so an
 // injected/buggy driver cannot abort the run.
 async function invokeDriver(
   driver: Driver,
   call: AgentCall,
   timeoutMs: number,
 ): Promise<AgentResult> {
+  const controller = new AbortController();
+  const abortableCall: AgentCall = { ...call, signal: controller.signal };
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const timeout = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve("timeout");
+      }, timeoutMs);
     });
-    const outcome = await Promise.race([driver(call), timeout]);
+    const outcome = await Promise.race([driver(abortableCall), timeout]);
     if (outcome === "timeout") {
       return {
-        verdicts: [failureVerdict(call.role, TIMEOUT_HALLAZGO)],
+        verdicts: [failureVerdict(call.role, timeoutHallazgo(timeoutMs))],
         calls: 1,
       };
     }
     return outcome;
   } catch (error: unknown) {
+    controller.abort();
     const message = error instanceof Error ? error.message : String(error);
     return {
       verdicts: [failureVerdict(call.role, `driver failed: ${message}`)],

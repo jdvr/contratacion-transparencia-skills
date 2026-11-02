@@ -15,12 +15,16 @@ export type Verdict = {
 };
 
 // One agent request. `allowFetch` is the resolved URL allowlist (Task 6); an
-// empty list means the agent must not fetch anything at all.
+// empty list means the agent must not fetch anything at all. `signal` is the
+// optional cancellation seam (Task 8): when aborted by the orchestrator's
+// per-call timeout, a real driver kills its spawned child. The Driver
+// signature itself does not change.
 export interface AgentCall {
   role: string;
   rubric: string;
   material: string;
   allowFetch: string[];
+  signal?: AbortSignal;
 }
 
 // What a driver returns. `calls` counts REAL subprocess spawns (1 normally,
@@ -37,8 +41,11 @@ export type Driver = (call: AgentCall) => Promise<AgentResult>;
 // Injectable spawn shape so tests can fake the agent without touching the
 // network or the real binary. `cmd` is the program to run, `args` its argv;
 // the promise resolves with the child's full stdout and exit code (a rejected
-// promise means the spawn itself failed, e.g. ENOENT).
+// promise means the spawn itself failed, e.g. ENOENT). The optional `signal`
+// lets the real implementation kill the child on abort; injected fakes may
+// ignore it (fewer parameters stay assignable).
 export type SpawnFn = (
   cmd: string,
   args: string[],
+  signal?: AbortSignal,
 ) => Promise<{ stdout: string; code: number }>;

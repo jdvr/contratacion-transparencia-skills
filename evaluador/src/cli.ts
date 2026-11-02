@@ -73,6 +73,8 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
         }),
       );
     }
+    // runEval's code is the process exit code (0/1, or 3 for an empty roles
+    // list, which the CLI cannot currently produce but must map).
     return result.code;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);

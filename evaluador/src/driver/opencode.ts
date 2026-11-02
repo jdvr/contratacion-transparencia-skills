@@ -112,15 +112,39 @@ function parseVerdict(json: string, role: string): Verdict | undefined {
 
 // Primary implementation: real `opencode run <prompt>` subprocess via
 // node:child_process. Spawn errors reject; the driver catches them above.
-const defaultRunProcess: SpawnFn = (cmd, args) =>
+// Exported so the focused test can exercise the real kill-on-abort path.
+// On abort (orchestrator per-call timeout) the child is killed and detached
+// from the event loop, so a hung backend cannot outlive the CLI; the piped
+// stdout closes with the child and this promise resolves on the close event.
+export const defaultRunProcess: SpawnFn = (cmd, args, signal) =>
   new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
     });
-    child.on("error", (error) => reject(error));
-    child.on("close", (code) => resolve({ stdout, code: code ?? 1 }));
+
+    const onAbort = (): void => {
+      child.kill();
+      // Detach so even a backend that ignores SIGTERM cannot keep Node alive
+      // after the orchestrator has already recorded the timeout verdict.
+      child.unref();
+      const pipe = child.stdout as unknown as { unref?: () => void } | null;
+      pipe?.unref?.();
+    };
+    if (signal !== undefined) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    child.on("error", (error) => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve({ stdout, code: code ?? 1 });
+    });
   });
 
 // Attempts: 1 normal, at most 1 retry when the output can't be parsed/validated
@@ -138,10 +162,11 @@ export function opencodeDriver(
       let stdout: string;
       let code: number;
       try {
-        ({ stdout, code } = await runProcess(cmd, [
-          "run",
-          buildPrompt(call, attempt > 0),
-        ]));
+        ({ stdout, code } = await runProcess(
+          cmd,
+          ["run", buildPrompt(call, attempt > 0)],
+          call.signal,
+        ));
       } catch {
         return { verdicts: [failureVerdict(call)], calls: 1 };
       }
