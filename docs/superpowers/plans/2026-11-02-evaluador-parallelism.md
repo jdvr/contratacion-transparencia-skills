@@ -383,13 +383,17 @@ it("budget is a soft cap: in-flight pairs finish, no new pair is launched", asyn
     evalOpts(session, barrier.driver, { budget: 2, jobs: 4, heartbeatMs: 0 }),
   );
 
+  // The exact count depends on how many in-flight calls finish before the
+  // workers observe the exhaustion; the contract is the ceiling.
+  const firstCalls = barrier.calls.length;
+  expect(firstCalls).toBeGreaterThanOrEqual(4); // the in-flight batch
+  expect(firstCalls).toBeLessThanOrEqual(5); // budget 2 + jobs-1
   expect(result.code).toBe(1);
-  expect(barrier.calls).toHaveLength(5); // 2 budget + 3 in-flight (jobs-1)
-  expect(result.spentThisRun).toBe(5);
+  expect(result.spentThisRun).toBe(firstCalls);
   const saved = loadState(stateDir(session));
   if (saved === null) throw new Error("state.json should exist");
-  expect(saved.petitions).toBe(5);
-  expect(gapPairs(saved, DEFAULT_ROLES)).toHaveLength(7);
+  expect(saved.petitions).toBe(firstCalls);
+  expect(gapPairs(saved, DEFAULT_ROLES)).toHaveLength(12 - firstCalls);
 });
 ```
 
@@ -400,6 +404,7 @@ it("resumes a parallel budget pause by driving only the missing pairs", async ()
   const session = newSession();
   const first = barrierDriver(4);
   await runEval(evalOpts(session, first.driver, { budget: 2, jobs: 4, heartbeatMs: 0 }));
+  const firstCalls = first.calls.length;
 
   const second = okDriver();
   const resumed = await runEval(
@@ -407,7 +412,7 @@ it("resumes a parallel budget pause by driving only the missing pairs", async ()
   );
 
   expect(resumed.code).toBe(0);
-  expect(second.calls).toHaveLength(7);
+  expect(second.calls).toHaveLength(12 - firstCalls);
   for (const rc of resumed.state.claims) {
     expect(rc.recheck).toBeUndefined();
     expect(rc.verdicts).toHaveLength(4);

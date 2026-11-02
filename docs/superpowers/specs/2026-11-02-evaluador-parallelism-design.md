@@ -177,12 +177,13 @@ cada worker:
 
 - Parseo de `--jobs` (válido, 0, negativo, texto, ausente) ⇒ exit 3 en los inválidos.
 - Concurrencia máxima observada: driver fake con barrera; `jobs 3` ⇒ `maxActive === 3`.
-- Budget: `budget 2`, `jobs 4`, 4 tareas en barrera ⇒ **5 llamadas** (sobrepaso
-  3 = `jobs-1`: al cobrarse la primera, `spent` aún es 1 < 2 y un worker lanza la
-  quinta antes de que las otras tres cobren), pares restantes con hueco, exit 1,
-  `petitions === 5`. Los tests existentes que fijan conteos exactos del modo
-  secuencial (`--budget 5` con 5 llamadas, etc.) pasan a `--jobs 1` o se
-  re-afirman con el nuevo límite; no se aceptan conteos viejos con default 4.
+- Budget: `budget 2`, `jobs 4`, 4 tareas en barrera ⇒ entre **4 y 5 llamadas**
+  (≤ `budget + jobs - 1`): las 4 en vuelo terminan y, según el orden en que los
+  workers observen el agotamiento, puede lanzarse o no una quinta; los pares
+  restantes quedan con hueco y exit 1. `petitions` y `spentThisRun` igualan las
+  llamadas reales. Los tests existentes que fijan conteos exactos del modo
+  secuencial (`--budget 5` con 5 llamadas, etc.) pasan a `--jobs 1`; no se
+  aceptan conteos viejos con default 4.
 - Determinismo: driver que resuelve en orden inverso; state/issue JSON iguales a
   los de `jobs 1` (ignorando `updatedAt`).
 - Reanudación: primer run con budget insuficiente; segundo con budget suficiente

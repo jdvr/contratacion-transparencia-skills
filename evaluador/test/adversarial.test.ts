@@ -1079,6 +1079,111 @@ describe("parallel scheduler", () => {
     expect(second.calls).toHaveLength(0);
   });
 
+  it("budget is a soft cap: in-flight pairs finish, no new pair is launched", async () => {
+    const session = newSession(); // 12 pairs
+    const barrier = barrierDriver(4);
+
+    const result = await runEval(
+      evalOpts(session, barrier.driver, { budget: 2, jobs: 4, heartbeatMs: 0 }),
+    );
+
+    // The exact count depends on how many in-flight calls finish before the
+    // workers observe the exhaustion; the contract is the ceiling.
+    const firstCalls = barrier.calls.length;
+    expect(firstCalls).toBeGreaterThanOrEqual(4); // the in-flight batch
+    expect(firstCalls).toBeLessThanOrEqual(5); // budget 2 + jobs-1
+    expect(result.code).toBe(1);
+    expect(result.spentThisRun).toBe(firstCalls);
+    const saved = loadState(stateDir(session));
+    if (saved === null) throw new Error("state.json should exist");
+    expect(saved.petitions).toBe(firstCalls);
+    expect(gapPairs(saved, DEFAULT_ROLES)).toHaveLength(12 - firstCalls);
+  });
+
+  it("resumes a parallel budget pause by driving only the missing pairs", async () => {
+    const session = newSession();
+    const first = barrierDriver(4);
+    await runEval(
+      evalOpts(session, first.driver, { budget: 2, jobs: 4, heartbeatMs: 0 }),
+    );
+    const firstCalls = first.calls.length;
+
+    const second = okDriver();
+    const resumed = await runEval(
+      evalOpts(session, second.driver, { budget: 20, jobs: 4, heartbeatMs: 0 }),
+    );
+
+    expect(resumed.code).toBe(0);
+    expect(second.calls).toHaveLength(12 - firstCalls);
+    for (const recorded of resumed.state.claims) {
+      expect(recorded.recheck).toBeUndefined();
+      expect(recorded.verdicts).toHaveLength(4);
+    }
+  });
+
+  it("SIGINT drains two in-flight calls and saves an interrumpido state", async () => {
+    const session = newSession([baseClaim("claim-c1"), baseClaim("claim-c2")]);
+    let calls = 0;
+    let reached!: () => void;
+    const started = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const driver: Driver = () => {
+      calls += 1;
+      if (calls === 2) reached();
+      return new Promise<AgentResult>(() => {});
+    };
+
+    const pending = runEval(
+      evalOpts(session, driver, { jobs: 2, heartbeatMs: 0 }),
+    );
+    await started;
+    process.emit("SIGINT", "SIGINT");
+    const paused = await pending;
+
+    expect(paused.code).toBe(1);
+    const saved = loadState(stateDir(session));
+    if (saved === null) throw new Error("state.json should exist after the pause");
+    expect(saved.claims).toHaveLength(1);
+    expect(saved.claims[0]?.claim.id).toBe("claim-c1");
+    expect(saved.claims[0]?.recheck).toBe("interrumpido");
+    expect(saved.claims[0]?.verdicts).toHaveLength(0);
+
+    const resumed = okDriver();
+    const second = await runEval(
+      evalOpts(session, resumed.driver, { jobs: 2, heartbeatMs: 0 }),
+    );
+    expect(second.code).toBe(0);
+    expect(resumed.calls).toHaveLength(8);
+  });
+
+  it("drains in-flight calls and rethrows when a checkpoint write fails", async () => {
+    const session = newSession([baseClaim("claim-c1"), baseClaim("claim-c2")]);
+    writeFileSync(stateDir(session), "not a directory");
+    let seenSignal: AbortSignal | undefined;
+    let secondStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    let calls = 0;
+    const driver: Driver = (call) => {
+      calls += 1;
+      if (calls === 2) {
+        seenSignal = call.signal;
+        secondStarted();
+        return new Promise<AgentResult>(() => {});
+      }
+      return Promise.resolve({ verdicts: [okVerdict(call)], calls: 1 });
+    };
+
+    const running = runEval(
+      evalOpts(session, driver, { jobs: 2, heartbeatMs: 0 }),
+    );
+    await started; // the second in-flight call exists before the checkpoint throw
+    await expect(running).rejects.toThrow();
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
   it("produces the same state and issues regardless of completion order", async () => {
     const makeDriver = (): Driver => async (call) => {
       // Different delays force out-of-order completions under jobs: 4.
