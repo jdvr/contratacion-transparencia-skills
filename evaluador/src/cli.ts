@@ -34,19 +34,24 @@ async function runInit(_args: string[]): Promise<number> {
   return initScripted(process.cwd(), (s) => process.stdout.write(s));
 }
 
-// eval <file> [--no-cache] [--budget N]: runs the structural gate and, when it
-// passes, the adversarial phases via runEval. The process exit code is runEval's
-// own (0/1), gate failure stays 2 (gaps JSON on stdout for the invoking model),
-// and an unreadable report or a malformed flag is a usage error (3). Full report
-// artifacts arrive in Task 11, so 0/1 are exit-only for now.
+// eval <file> [--no-cache] [--budget N] [--git-branches]: runs the structural
+// gate and, when it passes, the adversarial phases via runEval. The process exit
+// code is runEval's own (0/1), gate failure stays 2 (gaps JSON on stdout for the
+// invoking model), and an unreadable report or a malformed flag is a usage error
+// (3). Issue artifacts are written by runEval (Task 10); `--git-branches` (off
+// by default in v1) additionally creates `problema/<claimId>` for blocking
+// verdicts, with git failures degraded to warnings.
 async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
   let noCache = false;
+  let gitBranches = false;
   let budgetOverride: number | undefined;
   const positional: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] ?? "";
     if (arg === "--no-cache") {
       noCache = true;
+    } else if (arg === "--git-branches") {
+      gitBranches = true;
     } else if (arg === "--budget") {
       const value = args[i + 1];
       if (value === undefined || !/^\d+$/.test(value)) {
@@ -80,6 +85,7 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
       driver: deps.driver ?? opencodeDriver(),
       cwd: deps.cwd ?? process.cwd(),
       timeoutMs: deps.timeoutMs,
+      gitBranches,
     });
     if (result.code === EXIT_GATE_FAILED) {
       console.log(
@@ -127,7 +133,7 @@ function printUsage(): void {
     "",
     "Commands:",
     "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [--no-cache] [--budget N]  Run the structural gate and adversarial review",
+    "  eval <file> [--no-cache] [--budget N] [--git-branches]  Run the structural gate and adversarial review",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));

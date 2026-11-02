@@ -22,6 +22,13 @@
 // claim/role pair stays unbuilt, the claim is marked `recheck:
 // "presupuesto-agotado"` and the run exits 1 with that declared gap; a later
 // run with enough budget re-drives only the pairs that were never reviewed.
+//
+// Issues (Task 10): at the end of every completed or paused run, `writeIssues`
+// materializes one artifact per non-ok verdict and per unbuilt claim/role pair
+// under `.evaluador/issues/`. Exit codes stay state-driven (0/1/2/3, unchanged):
+// artifacts add no new code. The opt-in `gitBranches` flag opens
+// `problema/<claimId>` only for claims with a blocking verdict; git failures
+// are warnings and never change the exit code.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Budget } from "./budget.js";
@@ -30,6 +37,7 @@ import type { Claim } from "./contract.js";
 import type { AgentCall, AgentResult, Driver, Verdict } from "./driver/types.js";
 import { runGate } from "./gate.js";
 import type { Gap } from "./gate.js";
+import { createIssueBranches, writeIssues } from "./issues.js";
 import { DEFAULT_ROLES, RUBRIC_VERSION, resolveFetch, rubricFor } from "./rubric.js";
 import type { RoleId } from "./rubric.js";
 import { contentHash } from "./state.js";
@@ -59,6 +67,11 @@ export interface EvaluatorState {
   claims: RecordedClaim[];
   petitions: number;
   updatedAt: string;
+  // Roles requested by the run (Task 10): issue derivation needs to know which
+  // claim × role pairs were in scope, so a subset run does not invent issues
+  // for roles it never asked the driver to review. Optional for states written
+  // before Task 10 / by hand; absent means the default role set.
+  roles?: RoleId[];
 }
 
 // Per-call driver budget in milliseconds (Task 5 carry). Injectable via
@@ -155,7 +168,8 @@ function isEvaluatorState(value: unknown): value is EvaluatorState {
     Array.isArray(value.claims) &&
     value.claims.every(isRecordedClaim) &&
     typeof value.petitions === "number" &&
-    typeof value.updatedAt === "string"
+    typeof value.updatedAt === "string" &&
+    (value.roles === undefined || isStringArray(value.roles))
   );
 }
 
@@ -173,6 +187,9 @@ export interface RunEvalOptions {
   cwd: string;
   // Per-call driver timeout (tests inject a small value).
   timeoutMs?: number;
+  // Opt-in git branches for blocking issues (`--git-branches`, default off in
+  // v1). Branch failures only warn; they never change the exit code.
+  gitBranches?: boolean;
 }
 
 export interface RunEvalResult {
@@ -199,7 +216,12 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     return {
       code: 2,
       gaps: gate.gaps,
-      state: freshState(gate.claims, reportHash, new Date().toISOString()),
+      state: freshState(
+        gate.claims,
+        reportHash,
+        roles,
+        new Date().toISOString(),
+      ),
     };
   }
 
@@ -208,7 +230,12 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   if (roles.length === 0) {
     return {
       code: 3,
-      state: freshState(gate.claims, reportHash, new Date().toISOString()),
+      state: freshState(
+        gate.claims,
+        reportHash,
+        roles,
+        new Date().toISOString(),
+      ),
     };
   }
 
@@ -347,9 +374,19 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     claims,
     petitions,
     updatedAt: new Date().toISOString(),
+    roles: [...roles],
   };
   saveState(stateDir, state);
   if (cacheDirty) cache.save();
+
+  // Task 10: materialize the run's defects as artifacts before returning, then
+  // (opt-in) open one branch per claim with a blocking verdict. Git failures
+  // are warnings inside createIssueBranches and cannot change `code`.
+  const allVerdicts = claims.flatMap((recorded) => recorded.verdicts);
+  writeIssues(stateDir, allVerdicts, state);
+  if (opts.gitBranches === true) {
+    createIssueBranches(opts.cwd, allVerdicts);
+  }
 
   return {
     code: anyBlocking || !allHonest || anyGap ? 1 : 0,
@@ -423,6 +460,7 @@ function failureVerdict(role: string, hallazgo: string): Verdict {
 function freshState(
   claims: Claim[],
   reporte: string,
+  roles: RoleId[],
   updatedAt: string,
 ): EvaluatorState {
   return {
@@ -436,5 +474,6 @@ function freshState(
     })),
     petitions: 0,
     updatedAt,
+    roles: [...roles],
   };
 }
