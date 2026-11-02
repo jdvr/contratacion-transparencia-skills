@@ -5,14 +5,18 @@
 import { realpathSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runGate } from "./gate.js";
+import { initScripted } from "./init.js";
 
 const EXIT_OK = 0;
 const EXIT_UNKNOWN_COMMAND = 3;
 const EXIT_GATE_FAILED = 2;
 
-// Placeholder delegation targets; Tasks 4+ replace these with real implementations.
+// Placeholder delegation targets; Tasks 5+ replace these with real implementations.
+// init: prints the report contract (INIT_CONTRACT) and scaffolds .evaluador/
+// in the process cwd. stdout is written directly: initScripted's chunks carry
+// their own trailing newlines (no printUsage/console.log double-spacing).
 async function runInit(_args: string[]): Promise<number> {
-  return EXIT_UNKNOWN_COMMAND;
+  return initScripted(process.cwd(), (s) => process.stdout.write(s));
 }
 
 // eval <file>: runs the deterministic structural gate on the report. A failed
@@ -42,7 +46,7 @@ function printUsage(): void {
     "Usage: evaluador <command> [args]",
     "",
     "Commands:",
-    "  init   Set up the closing workflow (not yet wired)",
+    "  init   Document the report contract and scaffold .evaluador/ here",
     "  eval   Run the structural gate on a report (later phases pending)",
     "  --help Show this help",
   ];
