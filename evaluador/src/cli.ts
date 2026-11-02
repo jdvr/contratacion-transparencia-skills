@@ -46,6 +46,8 @@ export interface EvalArgs {
   gitBranches: boolean;
   budget?: number;
   roles?: RoleId[];
+  // Reviewer model passed verbatim to the backend (`provider/model`).
+  model?: string;
 }
 
 export type EvalArgsResult =
@@ -64,7 +66,8 @@ function resolveRole(name: string): RoleId | undefined {
 
 // Strict `eval` parser. Fail-closed rules (all exit 3 at the CLI):
 //   - any unknown token starting with "-" is a flag typo, never a file;
-//   - -o/--budget/--roles reject a missing value or one that starts with "-";
+//   - -o/--budget/--roles/--model reject a missing value or one that starts
+//     with "-";
 //   - exactly one positional (the report path) is accepted;
 //   - --roles is a comma list resolved through ROLE_ALIASES, all names valid.
 export function parseEvalArgs(argv: string[]): EvalArgsResult {
@@ -73,6 +76,7 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
   let budget: number | undefined;
   let outDir: string | undefined;
   let roles: RoleId[] | undefined;
+  let model: string | undefined;
   const positional: string[] = [];
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -126,6 +130,17 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
         i += 1;
         break;
       }
+      case "--model": {
+        const value = argv[i + 1];
+        // No format validation beyond this guard: `provider/model` is opencode's
+        // convention, not the harness's, so the value passes through verbatim.
+        if (value === undefined || value === "" || value.startsWith("-")) {
+          return { ok: false, message: "--model requires a provider/model value" };
+        }
+        model = value;
+        i += 1;
+        break;
+      }
       default:
         if (arg.startsWith("-")) {
           return { ok: false, message: `unknown flag: ${arg}` };
@@ -146,27 +161,29 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
   }
   return {
     ok: true,
-    args: { file, outDir, noCache, gitBranches, budget, roles },
+    args: { file, outDir, noCache, gitBranches, budget, roles, model },
   };
 }
 
 // eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b]
-// [--git-branches]: runs the structural gate and, when it passes, the
-// adversarial phases via runEval. The process exit code is runEval's own
-// (0/1), gate failure stays 2 (gaps JSON on stdout for the invoking model), and
-// an unreadable report or a malformed flag is a usage error (3). Issue
-// artifacts are written by runEval (Task 10); the four final outputs (Task 11)
-// land in `-o <dir>` or next to the report; `--git-branches` (off by default in
-// v1) additionally creates `problema/<claimId>` for blocking verdicts, with git
-// failures degraded to warnings. stdout stays reserved for the JSON status of a
-// gate failure.
+// [--model provider/model] [--git-branches]: runs the structural gate and, when
+// it passes, the adversarial phases via runEval. The process exit code is
+// runEval's own (0/1), gate failure stays 2 (gaps JSON on stdout for the invoking
+// model), and an unreadable report or a malformed flag is a usage error (3).
+// Issue artifacts are written by runEval (Task 10); the four final outputs
+// (Task 11) land in `-o <dir>` or next to the report; `--git-branches` (off by
+// default in v1) additionally creates `problema/<claimId>` for blocking
+// verdicts, with git failures degraded to warnings. stdout stays reserved for
+// the JSON status of a gate failure. `--model` applies to every reviewer role of
+// the run and is forwarded verbatim to `opencode run`.
 async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
   const parsed = parseEvalArgs(args);
   if (!parsed.ok) {
     console.error(`evaluador: ${parsed.message}`);
     return EXIT_UNKNOWN_COMMAND;
   }
-  const { file, outDir, noCache, gitBranches, budget, roles } = parsed.args;
+  const { file, outDir, noCache, gitBranches, budget, roles, model } =
+    parsed.args;
 
   try {
     readFileSync(file, "utf8"); // fail fast with the file-specific message
@@ -181,6 +198,7 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
       outDir,
       noCache,
       roles,
+      model,
       budget: budget ?? loadBudget(deps.cwd ?? process.cwd()),
       driver: deps.driver ?? opencodeDriver(),
       cwd: deps.cwd ?? process.cwd(),
@@ -233,7 +251,7 @@ function printUsage(): void {
     "",
     "Commands:",
     "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--git-branches]  Run the structural gate and adversarial review",
+    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--model provider/model] [--git-branches]  Run the structural gate and adversarial review",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));

@@ -166,6 +166,17 @@ function parseVerdict(json: string, role: string): Verdict | undefined {
   return verdict;
 }
 
+// argv for one `opencode run` call. The model flag is prepended only when a
+// model was requested, so the no-model argv stays exactly `["run", prompt]`.
+// `provider/model` is opencode's own convention: the harness validates only
+// that the value is non-empty and not flag-looking, then passes it verbatim.
+export function buildRunArgs(
+  model: string | undefined,
+  prompt: string,
+): string[] {
+  return ["run", ...(model ? ["--model", model] : []), prompt];
+}
+
 // Primary implementation: real `opencode run <prompt>` subprocess via
 // node:child_process. Spawn errors reject; the driver catches them above.
 // Exported so the focused test can exercise the real kill-on-abort path.
@@ -220,7 +231,7 @@ export function opencodeDriver(
       try {
         ({ stdout, code } = await runProcess(
           cmd,
-          ["run", buildPrompt(call, attempt > 0)],
+          buildRunArgs(call.model, buildPrompt(call, attempt > 0)),
           call.signal,
         ));
       } catch {

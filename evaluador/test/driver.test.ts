@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildRunArgs,
   defaultRunProcess,
   opencodeDriver,
 } from "../src/driver/opencode.js";
@@ -102,6 +103,32 @@ function isDead(pid: number): boolean {
 }
 
 describe("opencode driver", () => {
+  it("builds the run argv with the model only when one was requested", () => {
+    expect(buildRunArgs("opencode-go/deepseek-v4.1-flash", "PROMPT")).toEqual([
+      "run",
+      "--model",
+      "opencode-go/deepseek-v4.1-flash",
+      "PROMPT",
+    ]);
+    // No model: the historical argv is preserved byte for byte.
+    expect(buildRunArgs(undefined, "PROMPT")).toEqual(["run", "PROMPT"]);
+  });
+
+  it("passes call.model to the spawned argv", async () => {
+    const { run, calls } = scriptedRun([{ stdout: verdictJson(), code: 0 }]);
+    await opencodeDriver("opencode", run)({
+      ...baseCall,
+      model: "opencode-go/deepseek-v4.1-flash",
+    });
+
+    expect(calls[0]?.args.slice(0, 3)).toEqual([
+      "run",
+      "--model",
+      "opencode-go/deepseek-v4.1-flash",
+    ]);
+    expect(calls[0]?.args[3]).toContain(baseCall.rubric);
+  });
+
   it("(a2) accepts a bare JSON object with no fence, calls: 1 (no retry)", async () => {
     const { run, calls } = scriptedRun([
       { stdout: JSON.stringify(JSON.parse(stripFence(verdictJson()))), code: 0 },

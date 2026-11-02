@@ -16,6 +16,7 @@ Los ids son ASCII porque viajan por JSON, CLI y claves de caché; en las salidas
 ## Cómo se ejecutan
 
 - `evaluador eval reporte.md` corre **los cuatro en este orden**: `contadores → segunda-fuente → falsificador → metódico` (`DEFAULT_ROLES`).
+- **Modelo**: se elige con `--model provider/model`; aplica a los cuatro roles de esta ejecución; sin flag, se usa el default de opencode.
 - Cada **claim × rol** es una llamada al driver y consume una petición del presupuesto (un reintento de salida estructurada puede costar una segunda). Un claim de cinco cifras con los cuatro roles son veinte llamadas, menos las que sirva la caché.
 - **Contexto fresco por rol**: el driver pasa el claim (JSON), el material de apoyo y la allowlist de fetch; ningún rol ve los veredictos de los otros ni el historial de la conversación del autor.
 - El rol **solo dictamina**: devuelve un único bloque `json` con `claimId`, `role`, `resultado` (`ok` | `problema` | `sin-re-verificar`), `severidad` (`aviso` | `bloqueante`), `hallazgo` y `evidencia`; todo `problema` y todo `sin-re-verificar` deben traer `hallazgo` en español. La reparación es de quien invoca: leer `.evaluador/issues/`, corregir el reporte y volver a ejecutar. Un rol nunca reescribe la cifra.

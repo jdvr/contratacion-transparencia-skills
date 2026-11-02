@@ -44,6 +44,8 @@ describe("parseEvalArgs", () => {
       "0",
       "--roles",
       "contador,falsificador",
+      "--model",
+      "opencode-go/deepseek-v4.1-flash",
       "--git-branches",
     ]);
 
@@ -56,7 +58,27 @@ describe("parseEvalArgs", () => {
         gitBranches: true,
         budget: 0,
         roles: ["contadores", "falsificador"],
+        model: "opencode-go/deepseek-v4.1-flash",
       },
+    });
+  });
+
+  it("rejects a missing or flag-looking --model value", () => {
+    expect(parseEvalArgs(["reporte.md", "--model"])).toEqual({
+      ok: false,
+      message: "--model requires a provider/model value",
+    });
+    expect(parseEvalArgs(["reporte.md", "--model", "-foo"])).toEqual({
+      ok: false,
+      message: "--model requires a provider/model value",
+    });
+  });
+
+  it("passes the --model value through verbatim (no format validation)", () => {
+    const parsed = parseEvalArgs(["reporte.md", "--model", "mi-backend/v2:beta"]);
+    expect(parsed).toMatchObject({
+      ok: true,
+      args: { model: "mi-backend/v2:beta" },
     });
   });
 

@@ -270,6 +270,26 @@ describe("runEval", () => {
     expect(second.state.claims.map((rc) => rc.verdicts.length)).toEqual([4, 4, 4]);
   });
 
+  it("labels the cache with the requested model and keeps the old label otherwise", async () => {
+    const model = "opencode-go/deepseek-v4.1-flash";
+    const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const result = await runEval({ ...evalOpts(session, driver), model });
+
+    expect(result.code).toBe(0);
+    expect(calls).toHaveLength(12);
+    for (const call of calls) expect(call.model).toBe(model);
+
+    const stored = JSON.parse(
+      readFileSync(join(stateDir(session), "cache.json"), "utf8"),
+    ) as Record<string, Record<string, { model: string }>>;
+    const firstHash = result.state.claims[0]?.hash ?? "";
+    expect(stored[firstHash]?.contadores?.model).toBe(
+      `opencode-run(v1):${model}`,
+    );
+  });
+
   it("(c) changing one claim body re-reviews only that claim (4 calls)", async () => {
     const session = newSession();
     const first = await runEval(evalOpts(session, okDriver().driver));
@@ -1026,6 +1046,23 @@ describe("cli eval wiring", () => {
     ]);
     const state = loadState(stateDir(session));
     expect(state?.roles).toEqual(["contadores", "falsificador"]);
+  });
+
+  it("--model plumbs into every role call of the run", async () => {
+    const session = newSession();
+    const { driver, calls } = okDriver();
+    const model = "opencode-go/deepseek-v4.1-flash";
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath, "--model", model], {
+        driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toHaveLength(12); // 3 claims × the 4 default roles
+    for (const call of calls) expect(call.model).toBe(model);
   });
 
   it("--roles with an unknown name is exit 3 and never calls the driver", async () => {

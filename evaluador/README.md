@@ -38,7 +38,7 @@ node dist/cli.js init
 # Gate + adversarial review. Writes .evaluador/state.json, .evaluador/issues/,
 # and reporte-final.md/.html + evidencia.json + resumen.json next to the report
 # (or under -o <dir>):
-node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--git-branches]
+node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--model provider/model] [--git-branches]
 ```
 
 Exit codes:
@@ -53,6 +53,9 @@ Exit codes:
 The `--budget` counter tracks calls to the reviewer agents (driver calls), not
 HTTP requests to public portals; `resumen.json` reports the cumulative count
 (`petitions`) separately from this run's spend (`spentThisRun`).
+
+`--model provider/model` is passed verbatim to `opencode run` and applies to all
+reviewer roles in that run; without the flag, opencode's default model is used.
 
 ## Build and host
 

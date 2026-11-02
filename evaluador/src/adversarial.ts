@@ -97,7 +97,15 @@ export const DRIVER_TIMEOUT_MS = 300_000;
 
 // Honest cache model name (pre-flight ruling): the orchestration cannot know
 // which model `opencode run` selected, so it records what it actually did.
+// With a per-run `--model`, modelLabel appends it so a cached verdict never
+// claims more than it knows about the backend that produced it.
 export const CACHE_MODEL = "opencode-run(v1)";
+
+// Cache label for one run: the historical no-model string is preserved exactly;
+// a requested model renders as `opencode-run(v1):<provider>/<model>`.
+export function modelLabel(model: string | undefined): string {
+  return model ? `${CACHE_MODEL}:${model}` : CACHE_MODEL;
+}
 
 // Canonical hallazgo for a timed-out call. Reports the actual configured
 // budget: the default 300_000 ms renders the pinned "300 s" wording.
@@ -213,6 +221,9 @@ export interface RunEvalOptions {
   cwd: string;
   // Per-call driver timeout (tests inject a small value).
   timeoutMs?: number;
+  // Reviewer model for every role in this run (`--model provider/model`).
+  // Undefined means the backend's own default; the value is passed verbatim.
+  model?: string;
   // Opt-in git branches for blocking issues (`--git-branches`, default off in
   // v1). Branch failures only warn; they never change the exit code.
   gitBranches?: boolean;
@@ -423,6 +434,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
           material: materialFor(claim),
           allowFetch: fetchRules.allowed,
           blockedFetch: fetchRules.blocked,
+          model: opts.model,
         };
         const result = await invokeDriver(
           opts.driver,
@@ -458,7 +470,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
           // The cache holds one verdict per hash+role (the v1 driver returns one
           // per call); the state keeps every verdict of the call. With several
           // verdicts the last cached one wins, never silently dropping state.
-          cache.put(hash, role, verdict, CACHE_MODEL, new Date().toISOString());
+          cache.put(hash, role, verdict, modelLabel(opts.model), new Date().toISOString());
         }
         cacheDirty = true;
         verdicts.push(...assigned);

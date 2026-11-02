@@ -52,6 +52,8 @@ export function isVerdict(value: unknown): value is Verdict {
 // allowlist and a human must decide". `signal` is the optional cancellation seam
 // (Task 8): when aborted by the orchestrator's per-call timeout, a real driver
 // kills its spawned child. The Driver signature itself does not change.
+// `model` is the per-run reviewer model (`--model provider/model`), passed
+// through verbatim to the backend; absent means the backend's own default.
 export interface AgentCall {
   role: string;
   rubric: string;
@@ -59,6 +61,7 @@ export interface AgentCall {
   allowFetch: string[];
   blockedFetch?: string[];
   signal?: AbortSignal;
+  model?: string;
 }
 
 // What a driver returns. `calls` counts REAL subprocess spawns (1 normally,
