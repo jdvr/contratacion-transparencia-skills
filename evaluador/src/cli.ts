@@ -1,19 +1,40 @@
 // evaluador CLI entry point.
-// Exit codes: 0 = success, 3 = unknown (or not yet wired) command.
+// Exit codes: 0 = success, 2 = structural gate failed, 3 = unknown (or not yet
+// wired) command.
 // See docs/superpowers/specs/2026-10-31-evaluador-design.md.
-import { realpathSync } from "node:fs";
+import { realpathSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { runGate } from "./gate.js";
 
 const EXIT_OK = 0;
 const EXIT_UNKNOWN_COMMAND = 3;
+const EXIT_GATE_FAILED = 2;
 
-// Placeholder delegation targets; Tasks 2+ replace these with real implementations.
+// Placeholder delegation targets; Tasks 4+ replace these with real implementations.
 async function runInit(_args: string[]): Promise<number> {
   return EXIT_UNKNOWN_COMMAND;
 }
 
-async function runEval(_args: string[]): Promise<number> {
-  return EXIT_UNKNOWN_COMMAND;
+// eval <file>: runs the deterministic structural gate on the report. A failed
+// gate exits 2 with the machine-readable gaps JSON on stdout (repeatable until
+// the report passes). A passed gate is temporarily exit 0 with the gate result
+// JSON: phases 2+ (Task 8's runEval) will refine 0/1 from there.
+async function runEval(args: string[]): Promise<number> {
+  const file = args.shift();
+  if (file === undefined) {
+    console.error("evaluador: eval requires a report file path");
+    return EXIT_UNKNOWN_COMMAND;
+  }
+  let markdown: string;
+  try {
+    markdown = readFileSync(file, "utf8");
+  } catch {
+    console.error(`evaluador: cannot read report file: ${file}`);
+    return EXIT_UNKNOWN_COMMAND;
+  }
+  const { ok, gaps, claims } = runGate(markdown);
+  console.log(JSON.stringify({ ok, gaps, claims: claims.length }));
+  return ok ? EXIT_OK : EXIT_GATE_FAILED;
 }
 
 function printUsage(): void {
@@ -22,7 +43,7 @@ function printUsage(): void {
     "",
     "Commands:",
     "  init   Set up the closing workflow (not yet wired)",
-    "  eval   Run the adversarial-review closure (not yet wired)",
+    "  eval   Run the structural gate on a report (later phases pending)",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));
