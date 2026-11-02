@@ -23,6 +23,11 @@
 // "presupuesto-agotado"` and the run exits 1 with that declared gap; a later
 // run with enough budget re-drives only the pairs that were never reviewed.
 //
+// Final-review hardening: state/cache/issues/outputs are written atomically,
+// state+cache are checkpointed after each claim, and SIGINT/SIGTERM abort the
+// in-flight call and persist a resumable pause (`recheck: "interrumpido"`)
+// instead of losing the run.
+//
 // Issues (Task 10): at the end of every completed or paused run, `writeIssues`
 // materializes one artifact per non-ok verdict and per unbuilt claim/role pair
 // under `.evaluador/issues/`. Exit codes stay state-driven (0/1/2/3, unchanged):
@@ -36,7 +41,7 @@
 // run-scoped accounting those artifacts need (`budget`, `spentThisRun`,
 // `cacheHits`, `cacheMisses`) because `state.petitions` is cumulative across
 // resumed runs.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Budget } from "./budget.js";
 import { VerdictCache } from "./cache.js";
@@ -49,20 +54,22 @@ import { writeOutputs } from "./report.js";
 import type { RunStats } from "./report.js";
 import { DEFAULT_ROLES, RUBRIC_VERSION, resolveFetch, rubricFor } from "./rubric.js";
 import type { RoleId } from "./rubric.js";
-import { contentHash } from "./state.js";
+import { contentHash, writeFileAtomic } from "./state.js";
 
 // One claim as reviewed in one run: the parsed claim, its content hash and the
 // verdicts produced (one per role in v1, but the driver may return several per
 // call). `recheck` is the declared gap that keeps exit 0 closed: it is set when
 // any verdict is "sin-re-verificar" (driver failure / timeout / unreachable
-// source) and, taken by the request budget before a pair could run, as
-// "presupuesto-agotado" (Fase 3bis). The per-pair gap is the absence of that
-// role's verdict under the marker; Task 10 turns it into an issue.
+// source), when the request budget stopped a pair before it could run
+// ("presupuesto-agotado", Fase 3bis), or when SIGINT/SIGTERM paused the run
+// ("interrumpido"; resumed like a budget pause, never like a failure). The
+// per-pair gap is the absence of that role's verdict under the marker; Task 10
+// turns it into an issue.
 export interface RecordedClaim {
   claim: Claim;
   hash: string;
   verdicts: Verdict[];
-  recheck?: "presupuesto-agotado" | "sin-re-verificar";
+  recheck?: "presupuesto-agotado" | "sin-re-verificar" | "interrumpido";
 }
 
 // The whole resumable state. `reporte` is the content hash of the parsed
@@ -125,10 +132,11 @@ export function loadState(dir: string): EvaluatorState | null {
 }
 
 // Writes `<dir>/state.json` (pretty JSON, trailing newline), creating `dir` if
-// needed. Orchestration is the only writer; tests use it to seed scenarios.
+// needed. The swap is atomic (writeFileAtomic): a kill mid-write cannot corrupt
+// the resumable state.
 export function saveState(dir: string, state: EvaluatorState): void {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, STATE_FILE), JSON.stringify(state, null, 2) + "\n");
+  writeFileAtomic(join(dir, STATE_FILE), JSON.stringify(state, null, 2) + "\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -161,7 +169,8 @@ function isRecordedClaim(value: unknown): value is RecordedClaim {
   if (
     value.recheck !== undefined &&
     value.recheck !== "presupuesto-agotado" &&
-    value.recheck !== "sin-re-verificar"
+    value.recheck !== "sin-re-verificar" &&
+    value.recheck !== "interrumpido"
   ) {
     return false;
   }
@@ -302,121 +311,202 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   let cacheMisses = 0;
   let cacheDirty = false;
 
-  for (const claim of gate.claims) {
-    const hash = contentHash({ claim, rubricVersion: RUBRIC_VERSION });
-    const recorded = previousById.get(claim.id);
-    const reusable =
-      resumable && recorded !== undefined && recorded.hash === hash
-        ? recorded
-        : undefined;
-    // Resume semantics (Task 8 + final-review fix):
-    //  - `sin-re-verificar` is a PER-ROLE retry: only roles whose last verdict
-    //    was `sin-re-verificar` (or that never got one) reach the driver. Every
-    //    other verdict is preserved, so a prior blocker can never vanish just
-    //    because a retry was attempted (or the retry died on budget).
-    //  - `presupuesto-agotado` / `interrumpido` are pauses: the verdicts already
-    //    obtained are adopted and only the missing role pairs are re-driven.
-    //  - A subset run (`--roles`) never prunes verdicts of roles it did not
-    //    request: those are carried over untouched.
-    const recheck = reusable?.recheck;
-    const retryClaim = recheck === "sin-re-verificar";
-    const prior = reusable?.verdicts ?? [];
-    const requested = new Set<RoleId>(roles);
-    const verdicts: Verdict[] = prior.filter(
-      (verdict) => !requested.has(verdict.role as RoleId),
-    );
-    const fetchRules = resolveFetch(claim);
-    let budgetGap = false;
+  // SIGINT/SIGTERM are a declared pause, not a crash: the handler aborts the
+  // in-flight driver call, the loop stops, and state/cache are checkpointed so
+  // the next run resumes from the completed pairs. Registered once per run and
+  // removed in finally; runEval never calls process.exit.
+  const runController = new AbortController();
+  const onSignal = (): void => {
+    runController.abort();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
 
-    for (const role of roles) {
-      const priorForRole = prior.filter((verdict) => verdict.role === role);
-      const retryRole =
-        retryClaim &&
-        (priorForRole.length === 0 ||
-          priorForRole.some((verdict) => verdict.resultado === "sin-re-verificar"));
-      // A completed prior review (or a cache hit) is adopted unless this role
-      // is under a `sin-re-verificar` retry — its failed verdict must not mask
-      // the retry — or `--no-cache` forces a full re-review.
-      const canAdopt = !opts.noCache && !retryRole;
+  // In-memory snapshot of the state as it stands now. Checkpoints reuse it so
+  // a completed claim is never lost to a hard kill.
+  const snapshot = (): EvaluatorState => ({
+    version: 1,
+    reporte: reportHash,
+    rubricVersion: RUBRIC_VERSION,
+    claims: [...claims],
+    petitions,
+    updatedAt: new Date().toISOString(),
+    roles: [...stateRoles],
+  });
 
-      if (canAdopt && priorForRole.length > 0) {
-        cacheHits += 1;
-        verdicts.push(...priorForRole);
-        continue;
+  // Checkpoint after each claim (the loop is bounded and the writes are cheap):
+  // state + cache land atomically, so "reanudar por donde se quedó" survives a
+  // Ctrl-C or a kill. Mid-role checkpoints would persist a half-reviewed pair.
+  const checkpoint = (): void => {
+    saveState(stateDir, snapshot());
+    if (cacheDirty) cache.save();
+  };
+
+  let interrupted = false;
+
+  try {
+    for (const claim of gate.claims) {
+      if (runController.signal.aborted) {
+        interrupted = true;
+        break;
       }
-      if (canAdopt) {
-        const cached = cache.get(hash, role);
-        if (cached !== undefined) {
+      const hash = contentHash({ claim, rubricVersion: RUBRIC_VERSION });
+      const recorded = previousById.get(claim.id);
+      const reusable =
+        resumable && recorded !== undefined && recorded.hash === hash
+          ? recorded
+          : undefined;
+      // Resume semantics (Task 8 + final-review fix):
+      //  - `sin-re-verificar` is a PER-ROLE retry: only roles whose last verdict
+      //    was `sin-re-verificar` (or that never got one) reach the driver. Every
+      //    other verdict is preserved, so a prior blocker can never vanish just
+      //    because a retry was attempted (or the retry died on budget).
+      //  - `presupuesto-agotado` / `interrumpido` are pauses: the verdicts already
+      //    obtained are adopted and only the missing role pairs are re-driven.
+      //  - A subset run (`--roles`) never prunes verdicts of roles it did not
+      //    request: those are carried over untouched.
+      const recheck = reusable?.recheck;
+      const retryClaim = recheck === "sin-re-verificar";
+      const pendingSinReverificar = recheck === "sin-re-verificar";
+      const prior = reusable?.verdicts ?? [];
+      const requested = new Set<RoleId>(roles);
+      const verdicts: Verdict[] = prior.filter(
+        (verdict) => !requested.has(verdict.role as RoleId),
+      );
+      const fetchRules = resolveFetch(claim);
+      let budgetGap = false;
+      let claimInterrupted = false;
+
+      for (const role of roles) {
+        const priorForRole = prior.filter((verdict) => verdict.role === role);
+        const retryRole =
+          retryClaim &&
+          (priorForRole.length === 0 ||
+            priorForRole.some((verdict) => verdict.resultado === "sin-re-verificar"));
+        // A completed prior review (or a cache hit) is adopted unless this role
+        // is under a `sin-re-verificar` retry — its failed verdict must not mask
+        // the retry — or `--no-cache` forces a full re-review.
+        const canAdopt = !opts.noCache && !retryRole;
+
+        if (canAdopt && priorForRole.length > 0) {
           cacheHits += 1;
-          verdicts.push(cached);
+          verdicts.push(...priorForRole);
           continue;
         }
+        if (canAdopt) {
+          const cached = cache.get(hash, role);
+          if (cached !== undefined) {
+            cacheHits += 1;
+            verdicts.push(cached);
+            continue;
+          }
+        }
+
+        cacheMisses += 1;
+
+        // Fase 3bis: the budget gate sits between the miss and the driver.
+        // `exhausted` is exactly `spent + 1 > max`, so no call is made; the pair
+        // stays unbuilt and the claim declares the gap.
+        if (budget.exhausted) {
+          budgetGap = true;
+          continue;
+        }
+
+        const call: AgentCall = {
+          role,
+          rubric: rubricFor(role),
+          material: materialFor(claim),
+          allowFetch: fetchRules.allowed,
+          blockedFetch: fetchRules.blocked,
+        };
+        const result = await invokeDriver(
+          opts.driver,
+          call,
+          timeoutMs,
+          runController.signal,
+        );
+        if (result === "aborted") {
+          // The spawn already happened, so charge it honestly; the pair and
+          // every later one stay unbuilt under the declared `interrumpido` gap.
+          budget.take(1);
+          petitions += 1;
+          claimInterrupted = true;
+          break;
+        }
+        let assigned = result.verdicts.map((verdict) => ({
+          ...verdict,
+          claimId: claim.id, // Task 5 carry: the driver's verdict has claimId ""
+          role, // the call's role always wins over the agent's echo
+        }));
+        if (assigned.length === 0) {
+          // Defensive: a driver must return at least one verdict, but a declared
+          // gap is better than silently losing the claim/role pair.
+          assigned = [
+            {
+              ...failureVerdict(role, "driver returned no verdicts"),
+              claimId: claim.id,
+              role,
+            },
+          ];
+        }
+        for (const verdict of assigned) {
+          // The cache holds one verdict per hash+role (the v1 driver returns one
+          // per call); the state keeps every verdict of the call. With several
+          // verdicts the last cached one wins, never silently dropping state.
+          cache.put(hash, role, verdict, CACHE_MODEL, new Date().toISOString());
+        }
+        cacheDirty = true;
+        verdicts.push(...assigned);
+        // Post-call accounting charges the real spawns (1, or 2 with retry). A
+        // retry arriving with one petition left is accepted: the counter caps at
+        // max and `petitions` keeps the one-call overshoot declared.
+        budget.take(result.calls);
+        petitions += result.calls;
       }
 
-      cacheMisses += 1;
-
-      // Fase 3bis: the budget gate sits between the miss and the driver.
-      // `exhausted` is exactly `spent + 1 > max`, so no call is made; the pair
-      // stays unbuilt and the claim declares the gap.
-      if (budget.exhausted) {
-        budgetGap = true;
-        continue;
+      const next: RecordedClaim = { claim, hash, verdicts };
+      // A pause (budget or signal) must never DROP a pending
+      // `sin-re-verificar`: if that claim's retry did not complete, it keeps its
+      // stronger marker (and its cache bypass) and only a completed retry may
+      // reclassify it. A fresh pause is the weaker gap.
+      if (claimInterrupted) {
+        next.recheck = pendingSinReverificar ? "sin-re-verificar" : "interrumpido";
+      } else if (
+        verdicts.some((verdict) => verdict.resultado === "sin-re-verificar") ||
+        (budgetGap && pendingSinReverificar)
+      ) {
+        next.recheck = "sin-re-verificar";
+      } else if (budgetGap) {
+        next.recheck = "presupuesto-agotado";
       }
-
-      const call: AgentCall = {
-        role,
-        rubric: rubricFor(role),
-        material: materialFor(claim),
-        allowFetch: fetchRules.allowed,
-        blockedFetch: fetchRules.blocked,
-      };
-      const result = await invokeDriver(opts.driver, call, timeoutMs);
-      let assigned = result.verdicts.map((verdict) => ({
-        ...verdict,
-        claimId: claim.id, // Task 5 carry: the driver's verdict has claimId ""
-        role, // the call's role always wins over the agent's echo
-      }));
-      if (assigned.length === 0) {
-        // Defensive: a driver must return at least one verdict, but a declared
-        // gap is better than silently losing the claim/role pair.
-        assigned = [
-          {
-            ...failureVerdict(role, "driver returned no verdicts"),
-            claimId: claim.id,
-            role,
-          },
-        ];
+      claims.push(next);
+      checkpoint();
+      if (claimInterrupted) {
+        interrupted = true;
+        break;
       }
-      for (const verdict of assigned) {
-        // The cache holds one verdict per hash+role (the v1 driver returns one
-        // per call); the state keeps every verdict of the call. With several
-        // verdicts the last cached one wins, never silently dropping state.
-        cache.put(hash, role, verdict, CACHE_MODEL, new Date().toISOString());
-      }
-      cacheDirty = true;
-      verdicts.push(...assigned);
-      // Post-call accounting charges the real spawns (1, or 2 with retry). A
-      // retry arriving with one petition left is accepted: the counter caps at
-      // max and `petitions` keeps the one-call overshoot declared.
-      budget.take(result.calls);
-      petitions += result.calls;
     }
+  } finally {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+  }
 
-    const next: RecordedClaim = { claim, hash, verdicts };
-    // A budget pause must never DROP a pending `sin-re-verificar`: if that
-    // claim's retry did not complete, it keeps its stronger marker (and its
-    // cache bypass) and only a completed retry may reclassify it. A fresh
-    // budget-only pause is the weaker gap.
-    const pendingSinReverificar = recheck === "sin-re-verificar";
-    if (
-      verdicts.some((verdict) => verdict.resultado === "sin-re-verificar") ||
-      (budgetGap && pendingSinReverificar)
-    ) {
-      next.recheck = "sin-re-verificar";
-    } else if (budgetGap) {
-      next.recheck = "presupuesto-agotado";
-    }
-    claims.push(next);
+  // Interrupted run: persist the resumable state and stop with exit 1, without
+  // rendering final artifacts (a report missing claims would look complete).
+  // The `interrumpido` marker is mapped to an `sin-re-verificar` issue on the
+  // next run, which re-drives only the pairs that never produced a verdict.
+  if (interrupted) {
+    const paused = snapshot();
+    saveState(stateDir, paused);
+    if (cacheDirty) cache.save();
+    return {
+      code: 1,
+      state: paused,
+      budget: opts.budget,
+      spentThisRun: petitions - startPetitions,
+      cacheHits,
+      cacheMisses,
+    };
   }
 
   // Semantics 4: exit 0 only with zero blockers and honest labels on every
@@ -489,14 +579,30 @@ function materialFor(claim: Claim): string {
 // AbortSignal fires, so the real driver kills its child: the call is abandoned
 // and the timeout verdict is final (no orphan subprocess keeps the CLI alive).
 // A rejection is likewise contained here as a declared failure, so an
-// injected/buggy driver cannot abort the run.
+// injected/buggy driver cannot abort the run. A SIGINT/SIGTERM (runSignal)
+// returns "aborted" instead of a verdict: the pair was never reviewed and the
+// caller records a declared pause, not a driver failure.
 async function invokeDriver(
   driver: Driver,
   call: AgentCall,
   timeoutMs: number,
-): Promise<AgentResult> {
+  runSignal: AbortSignal,
+): Promise<AgentResult | "aborted"> {
   const controller = new AbortController();
   const abortableCall: AgentCall = { ...call, signal: controller.signal };
+  let resolveAborted: (() => void) | undefined;
+  const aborted = new Promise<"aborted">((resolve) => {
+    resolveAborted = () => resolve("aborted");
+  });
+  const onRunAbort = (): void => {
+    controller.abort();
+    resolveAborted?.();
+  };
+  if (runSignal.aborted) {
+    controller.abort();
+    return "aborted";
+  }
+  runSignal.addEventListener("abort", onRunAbort, { once: true });
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const timeout = new Promise<"timeout">((resolve) => {
@@ -505,7 +611,10 @@ async function invokeDriver(
         resolve("timeout");
       }, timeoutMs);
     });
-    const outcome = await Promise.race([driver(abortableCall), timeout]);
+    const outcome = await Promise.race([driver(abortableCall), timeout, aborted]);
+    if (outcome === "aborted") {
+      return "aborted";
+    }
     if (outcome === "timeout") {
       return {
         verdicts: [failureVerdict(call.role, timeoutHallazgo(timeoutMs))],
@@ -522,6 +631,7 @@ async function invokeDriver(
     };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    runSignal.removeEventListener("abort", onRunAbort);
   }
 }
 

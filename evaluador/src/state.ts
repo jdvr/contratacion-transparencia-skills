@@ -8,6 +8,7 @@
 // See docs/superpowers/specs/2026-10-31-evaluador-design.md.
 
 import { createHash } from "node:crypto";
+import { renameSync, rmSync, writeFileSync } from "node:fs";
 
 // JSON.parse-style container check (arrays and null excluded).
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -42,6 +43,21 @@ function canonicalize(value: unknown): unknown {
     return sorted;
   }
   return value;
+}
+
+// Atomic file write: the bytes land in `<path>.tmp` first and the rename makes
+// the swap atomic within the filesystem, so a crash mid-write never leaves a
+// truncated state/cache/output behind (a partial state.json would be read as
+// "no resumable state" and silently force a full re-run).
+export function writeFileAtomic(path: string, data: string): void {
+  const tmp = `${path}.tmp`;
+  try {
+    writeFileSync(tmp, data);
+    renameSync(tmp, path);
+  } catch (error: unknown) {
+    rmSync(tmp, { force: true });
+    throw error;
+  }
 }
 
 // Content hash: sha256 over the canonical JSON, lowercase hex. The exact

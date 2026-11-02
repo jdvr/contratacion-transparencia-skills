@@ -11,10 +11,11 @@
 // role ids are the rubric's ASCII type union, and there is no runtime enum to
 // consult. Zero runtime dependencies (node:fs only).
 // See docs/superpowers/specs/2026-10-31-evaluador-design.md.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Verdict } from "./driver/types.js";
 import type { RoleId } from "./rubric.js";
+import { writeFileAtomic } from "./state.js";
 
 export interface CachedVerdict {
   verdict: Verdict;
@@ -47,10 +48,11 @@ export class VerdictCache {
   }
 
   // Explicit write-back: mkdir -p the parent, then the whole store, pretty
-  // JSON (human-inspectable, and re-JSON.parseable by the next instance).
+  // JSON (human-inspectable, and re-JSON.parseable by the next instance). The
+  // atomic swap keeps a killed process from leaving a truncated cache.
   save(): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    writeFileSync(this.path, JSON.stringify(this.loaded(), null, 2) + "\n");
+    writeFileAtomic(this.path, JSON.stringify(this.loaded(), null, 2) + "\n");
   }
 
   // First access reads the file if it exists; an absent, unreadable, corrupt

@@ -284,6 +284,29 @@ describe("writeIssues", () => {
     ]);
   });
 
+  it("maps the interrumpido marker to a sin-re-verificar issue with its own wording", () => {
+    const dir = stateDir(newTempDir());
+    const claim = baseClaim("c1");
+    const reviewed = verdict("c1", "contadores");
+    const state = stateFor(
+      [recorded(claim, [reviewed], "interrumpido")],
+      DEFAULT_ROLES,
+    );
+
+    const issues = writeIssues(dir, [reviewed], state);
+
+    expect(issues.map((issue) => issue.role)).toEqual([
+      "segunda-fuente",
+      "falsificador",
+      "metodico",
+    ]);
+    for (const issue of issues) {
+      expect(issue.severity).toBe("bloqueante");
+      expect(issue.estado).toBe("sin-re-verificar");
+      expect(issue.hallazgo).toBe("no re-verificado: ejecución interrumpida");
+    }
+  });
+
   it("a paused claim with zero verdicts still yields one issue per role", () => {
     const dir = stateDir(newTempDir());
     const claim = baseClaim("c1");

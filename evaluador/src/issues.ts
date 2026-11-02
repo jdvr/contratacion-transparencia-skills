@@ -28,12 +28,12 @@ import {
   mkdirSync,
   readdirSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import type { EvaluatorState } from "./adversarial.js";
 import type { Verdict } from "./driver/types.js";
 import { DEFAULT_ROLES } from "./rubric.js";
+import { writeFileAtomic } from "./state.js";
 
 export interface Issue {
   id: string; // p. ej. "i-001"
@@ -147,7 +147,9 @@ function gapIssue(
   const hallazgo =
     recheck === "presupuesto-agotado"
       ? "no re-verificado: presupuesto agotado"
-      : "no re-verificado: reintento pendiente";
+      : recheck === "interrumpido"
+        ? "no re-verificado: ejecución interrumpida"
+        : "no re-verificado: reintento pendiente";
   return {
     id: "",
     claimId,
@@ -196,7 +198,7 @@ function writeArtifacts(dir: string, issues: Issue[]): void {
   if (issues.length === 0) return;
   mkdirSync(issuesDir, { recursive: true });
   for (const issue of issues) {
-    writeFileSync(
+    writeFileAtomic(
       join(issuesDir, `${issue.id}.json`),
       JSON.stringify(issue, null, 2) + "\n",
     );

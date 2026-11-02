@@ -3,7 +3,7 @@
 // `opencode` binary, no network, no subprocess — and every tempdir is removed
 // in `afterAll`. Fixtures are generated (fictitious) and pass the structural
 // gate, so each scenario exercises orchestration, not the gate's rejections.
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -19,7 +19,7 @@ import { RESULTADOS, SEVERIDADES } from "../src/driver/opencode.js";
 import type { AgentCall, AgentResult, Driver, Verdict } from "../src/driver/types.js";
 import { DEFAULT_ROLES, RUBRIC_VERSION, rubricFor } from "../src/rubric.js";
 import type { RoleId } from "../src/rubric.js";
-import { contentHash } from "../src/state.js";
+import { contentHash, writeFileAtomic } from "../src/state.js";
 
 // ── generated fixtures ────────────────────────────────────────────────────
 
@@ -625,6 +625,54 @@ describe("runEval", () => {
     }
   });
 
+  it("SIGINT pauses with an interrumpido marker and the next run completes the missing pairs", async () => {
+    const session = newSession(); // 3 claims × 4 roles = 12 pairs
+    let calls = 0;
+    let signalReached: (() => void) | undefined;
+    const reached = new Promise<void>((resolve) => {
+      signalReached = resolve;
+    });
+    const hanging: Driver = (call) => {
+      calls += 1;
+      if (calls === 6) {
+        signalReached?.();
+        return new Promise<AgentResult>(() => {});
+      }
+      return Promise.resolve({ verdicts: [okVerdict(call)], calls: 1 });
+    };
+
+    const pending = runEval(evalOpts(session, hanging));
+    await reached;
+    process.emit("SIGINT", "SIGINT");
+    const paused = await pending;
+
+    expect(calls).toBe(6); // five completed pairs + the aborted one
+    expect(paused.code).toBe(1);
+
+    const saved = loadState(stateDir(session));
+    expect(saved).not.toBeNull();
+    if (saved === null) throw new Error("state.json should exist after the pause");
+    const c1 = recordedClaim(saved, "claim-c1");
+    expect(c1.recheck).toBeUndefined();
+    expect(c1.verdicts).toHaveLength(4);
+    const c2 = recordedClaim(saved, "claim-c2");
+    expect(c2.recheck).toBe("interrumpido");
+    expect(c2.verdicts).toHaveLength(1); // contadores finished before the hang
+    expect(saved.claims).toHaveLength(2); // claim-c3 was never reached
+
+    // A fresh run adopts the completed pairs and drives only what is missing:
+    // claim-c2's three remaining roles + claim-c3's four.
+    const resumed = okDriver();
+    const second = await runEval(evalOpts(session, resumed.driver));
+
+    expect(second.code).toBe(0);
+    expect(resumed.calls).toHaveLength(7);
+    for (const rc of second.state.claims) {
+      expect(rc.recheck).toBeUndefined();
+      expect(rc.verdicts).toHaveLength(4);
+    }
+  });
+
   it("driver timeout ⇒ declared sin-re-verificar verdict, code 1, never throws", async () => {
     const session = newSession([baseClaim("claim-timeout")]);
     let calls = 0;
@@ -674,6 +722,20 @@ describe("runEval", () => {
 });
 
 // ── state IO ──────────────────────────────────────────────────────────────
+
+describe("writeFileAtomic", () => {
+  it("replaces the existing file and leaves no .tmp behind", () => {
+    const dir = newTempDir();
+    const path = join(dir, "state.json");
+
+    writeFileAtomic(path, "first\n");
+    writeFileAtomic(path, "second\n");
+
+    expect(readFileSync(path, "utf8")).toBe("second\n");
+    expect(existsSync(`${path}.tmp`)).toBe(false);
+    expect(readdirSync(dir)).toEqual(["state.json"]);
+  });
+});
 
 describe("state IO", () => {
   it("saveState/loadState round-trip; missing, corrupt or wrong-version ⇒ null", () => {

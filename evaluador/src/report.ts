@@ -32,13 +32,14 @@
 // v1 deliberately ships counters + tables only. The source/claim graph is a
 // v2 artifact:
 // TODO(v2): source graph
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { EvaluatorState, RecordedClaim } from "./adversarial.js";
 import type { Claim } from "./contract.js";
 import type { Issue } from "./issues.js";
 import { ROLE_DISPLAY_NAMES } from "./rubric.js";
 import type { RoleId } from "./rubric.js";
+import { writeFileAtomic } from "./state.js";
 
 // Exact artifact names (asserted by the e2e test in Task 12).
 export const OUTPUT_FILES = {
@@ -438,7 +439,7 @@ export function writeOutputs(
   const written: string[] = [];
   for (const [name, content] of outputs) {
     const path = join(dir, name);
-    writeFileSync(path, content);
+    writeFileAtomic(path, content);
     written.push(path);
   }
   return written;
