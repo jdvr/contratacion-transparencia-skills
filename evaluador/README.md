@@ -11,6 +11,13 @@ the report author's.
 All fixtures in this directory are **generated data**; do not put real company
 data (NIF, awards, amounts) in tests.
 
+**Never commit material produced from a real report.** Generated outputs
+(`reporte-final.md`, `reporte-final.html`, `evidencia.json`, `resumen.json`,
+and the whole `.evaluador/` working directory) can carry personal or company
+data from the sources you reviewed. They belong in your working directories,
+not in this public repository; the root `.gitignore` already excludes
+`.evaluador/`.
+
 ## Commands
 
 ```bash
