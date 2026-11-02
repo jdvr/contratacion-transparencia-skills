@@ -38,7 +38,7 @@ node dist/cli.js init
 # Gate + adversarial review. Writes .evaluador/state.json, .evaluador/issues/,
 # and reporte-final.md/.html + evidencia.json + resumen.json next to the report
 # (or under -o <dir>):
-node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--model provider/model] [--timeout 300] [--git-branches]
+node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--model provider/model] [--timeout 300] [--jobs 4] [--git-branches]
 ```
 
 Exit codes:
@@ -68,6 +68,16 @@ models can legitimately spend minutes on one claim — watch the heartbeat, and
 prefer a fast model for long reports (e.g. `--model opencode-go/deepseek-v4.1-flash`
 worked reliably for this repo). A backend that traps `SIGTERM` is escalated to
 `SIGKILL` after a 5 s grace, so an aborted run leaves no orphan subprocess.
+
+`--jobs N` runs up to N claim×role pairs concurrently (CLI default **4**;
+`--jobs 1` is the sequential mode). The pool is over all pairs, so a slow role
+does not block the other claims; state, issues and branches still materialize in
+claim→role order. The budget is a **soft cap**: no new pair is launched once
+`spent >= budget`, but pairs already in flight finish, so the real spend can
+exceed the budget by up to `jobs-1` calls (plus one retry per in-flight call, as
+in the sequential mode). `spentThisRun` and `petitions` record the real calls.
+Four concurrent clients can hit provider rate limits on free models; use
+`--jobs 2` if that happens.
 
 ## Build and host
 
