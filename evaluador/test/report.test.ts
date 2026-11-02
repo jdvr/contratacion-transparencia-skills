@@ -233,7 +233,25 @@ describe("renderFinalMd", () => {
     expect(md).toContain("la cifra mezcla adjudicado y estimado (dato generado)");
     expect(md).toContain("## Fuentes");
     expect(md).toContain(CLAIM_URL);
-    expect(md).toContain("peticiones (acumuladas): 7");
+    expect(md).toContain("peticiones acumuladas: 7");
+  });
+
+  it("(a2) renders run-scoped spend, cache use and the cumulative total", () => {
+    const md = renderFinalMd(programmedState(), programmedIssues(), RUN_STATS);
+
+    expect(md).toContain("## Uso de esta ejecución");
+    expect(md).toContain("peticiones acumuladas: 7");
+    expect(md).toContain("esta ejecución: 5 de budget 20");
+    expect(md).toContain("cache: 1 hit(s) / 2 miss(es)");
+    // Honest limitation: the budget counts reviewer calls, not portal requests.
+    expect(md).toContain("no peticiones a portales");
+  });
+
+  it("(a3) without run stats the spend line says honestly that it was not measured", () => {
+    const md = renderFinalMd(programmedState(), programmedIssues());
+
+    expect(md).toContain("esta ejecución: no medida");
+    expect(md).toContain("cache: no medido");
   });
 
   it("attribution chip is absent when no licencia mentions Canarias", () => {
@@ -306,6 +324,16 @@ describe("renderHtml", () => {
     expect(html).toContain("[VERIFICADO]");
     expect(html).toContain("Fuente: Gobierno de Canarias");
     expect(html).toContain(CLAIM_URL.replace(/&/g, "&amp;")); // escaped, not dropped
+  });
+
+  it("(b2) shows the run-scoped spend line and the budget limitation", () => {
+    const html = renderHtml(programmedState(), programmedIssues(), RUN_STATS);
+
+    expect(html).toContain("Uso de esta ejecución");
+    expect(html).toContain("peticiones acumuladas:</strong> 7");
+    expect(html).toContain("esta ejecución:</strong> 5 de budget 20");
+    expect(html).toContain("cache:</strong> 1 hit(s) / 2 miss(es)");
+    expect(html).toContain("no peticiones a portales");
   });
 
   it("imports no library of any kind (inline CSS only)", () => {
@@ -439,6 +467,7 @@ describe("renderResumen", () => {
         "openIssues",
         "unverifiedIssues",
         "petitions",
+        "spentThisRun",
         "budget",
         "cacheHits",
         "cacheMisses",
@@ -453,6 +482,7 @@ describe("renderResumen", () => {
     expect(data.openIssues).toBe(2);
     expect(data.unverifiedIssues).toBe(0);
     expect(data.petitions).toBe(7); // state.petitions is cumulative
+    expect(data.spentThisRun).toBe(5); // run-scoped, never mixed with petitions
     expect(data.budget).toBe(20);
     expect(data.cacheHits).toBe(1);
     expect(data.cacheMisses).toBe(2);
@@ -472,6 +502,7 @@ describe("renderResumen", () => {
     expect(data.budget).toBeNull();
     expect(data.cacheHits).toBeNull();
     expect(data.cacheMisses).toBeNull();
+    expect(data.spentThisRun).toBeNull();
   });
 
   it("computes the closure state from the issues", () => {
@@ -641,6 +672,46 @@ describe("runEval stats", () => {
     });
     expect(noCache.cacheHits).toBe(0);
     expect(noCache.cacheMisses).toBe(4);
+  });
+
+  it("a resumed run keeps petitions cumulative and reports this run's spend", async () => {
+    const reportPath = cliReport([
+      baseClaim("claim-c1", { licencia: "Datos Generados (fixture)" }),
+      baseClaim("claim-c2", { licencia: "Datos Generados (fixture)" }),
+    ]);
+    const cwd = dirname(reportPath);
+
+    const first = await runEval({
+      reportPath,
+      cwd,
+      budget: 4, // reviews claim-c1 only, then pauses
+      driver: okDriver().driver,
+    });
+    expect(first.code).toBe(1);
+    expect(first.spentThisRun).toBe(4);
+
+    const second = await runEval({
+      reportPath,
+      cwd,
+      budget: 20,
+      driver: okDriver().driver,
+    });
+    expect(second.code).toBe(0);
+    expect(second.spentThisRun).toBe(4); // only claim-c2's four pairs
+    expect(second.state.petitions).toBe(8); // 4 + 4 across the resumed runs
+
+    const resumen = JSON.parse(
+      readFileSync(join(cwd, OUTPUT_FILES.resumen), "utf8"),
+    ) as { petitions: number; spentThisRun: number; budget: number };
+    expect(resumen.petitions).toBe(8);
+    expect(resumen.spentThisRun).toBe(4);
+    expect(resumen.budget).toBe(20);
+
+    const md = readFileSync(join(cwd, OUTPUT_FILES.md), "utf8");
+    expect(md).toContain("peticiones acumuladas: 8");
+    expect(md).toContain("esta ejecución: 4 de budget 20");
+    const html = readFileSync(join(cwd, OUTPUT_FILES.html), "utf8");
+    expect(html).toContain("esta ejecución:</strong> 4 de budget 20");
   });
 });
 

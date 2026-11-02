@@ -36,6 +36,10 @@ Exit codes:
 | `2` | Structural gate failed: machine-readable gaps on stdout, no state written. |
 | `3` | Usage error (bad flags, missing/unreadable report, empty roles). |
 
+The `--budget` counter tracks calls to the reviewer agents (driver calls), not
+HTTP requests to public portals; `resumen.json` reports the cumulative count
+(`petitions`) separately from this run's spend (`spentThisRun`).
+
 ## Build and host
 
 `npm run build` bundles everything into `dist/cli.js`: one self-contained ESM

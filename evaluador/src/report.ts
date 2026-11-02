@@ -15,13 +15,14 @@
 //     is never invented when the licence does not ask for attribution.
 //   - `resumen.json` uses stable ENGLISH machine keys:
 //     {claims, blockers, warnings, openIssues, unverifiedIssues, petitions,
-//     budget, cacheHits, cacheMisses, estado, usoResponsible}. This is the
-//     Task 11 carry that renamed the brief's Spanish spellings (bloqueantes →
-//     blockers, avisos → warnings, presupuesto → budget, uso_responsable →
-//     usoResponsible) so the manifest is stable for machine consumers.
-//     `petitions` is the cumulative counter kept in `.evaluador/state.json`;
-//     `budget`/`cacheHits`/`cacheMisses` are run-scoped and are `null` when the
-//     caller did not pass run stats (honest "not measured", never a fake 0).
+//     spentThisRun, budget, cacheHits, cacheMisses, estado, usoResponsible}.
+//     This is the Task 11 carry that renamed the brief's Spanish spellings
+//     (bloqueantes → blockers, avisos → warnings, presupuesto → budget,
+//     uso_responsable → usoResponsible) so the manifest is stable for machine
+//     consumers. `petitions` is the cumulative counter kept in
+//     `.evaluador/state.json`; `spentThisRun`/`budget`/`cacheHits`/`cacheMisses`
+//     are run-scoped and are `null` when the caller did not pass run stats
+//     (honest "not measured", never a fake 0).
 //     Issue-level `estado: "cerrada"` is unreachable in v1 by design: closure
 //     prunes the issue instead of marking it closed (Task 10), so no renderer
 //     fabricates closed issues.
@@ -81,6 +82,8 @@ const ATTRIBUTION_CHIP = "Fuente: Gobierno de Canarias";
 // Counts shared by the Markdown and HTML summaries. `blockers`/`warnings` are
 // issue severities (Task 10 emits one issue per non-ok verdict, so an issue is
 // the authoritative defect), while the verdict counters are shown per claim.
+// `petitions` is cumulative across resumed runs; `spentThisRun`/`budget` and
+// the cache counters are run-scoped (null when the caller passed no stats).
 interface Counts {
   claims: number;
   blockers: number;
@@ -88,6 +91,7 @@ interface Counts {
   openIssues: number;
   unverifiedIssues: number;
   petitions: number;
+  spentThisRun: number | null;
   budget: number | null;
   cacheHits: number | null;
   cacheMisses: number | null;
@@ -98,8 +102,12 @@ interface Counts {
 
 // Human-facing Markdown: state line, counters, claims table, claim detail with
 // honest labels + attribution, issue list and the sources summary.
-export function renderFinalMd(state: EvaluatorState, issues: Issue[]): string {
-  const counts = countsFor(state, issues, undefined);
+export function renderFinalMd(
+  state: EvaluatorState,
+  issues: Issue[],
+  runStats?: RunStats,
+): string {
+  const counts = countsFor(state, issues, runStats);
   const date = reviewDate(state);
 
   const lines: string[] = [
@@ -115,7 +123,12 @@ export function renderFinalMd(state: EvaluatorState, issues: Issue[]): string {
     `- avisos: ${counts.warnings}`,
     `- issues abiertos: ${counts.openIssues}`,
     `- sin re-verificar: ${counts.unverifiedIssues}`,
-    `- peticiones (acumuladas): ${counts.petitions}`,
+    "",
+    "## Uso de esta ejecución",
+    "",
+    `- peticiones acumuladas: ${counts.petitions}`,
+    `- esta ejecución: ${runSpendText(counts)}`,
+    `- cache: ${cacheUseText(counts)}`,
     "",
     "## Afirmaciones",
     "",
@@ -181,6 +194,8 @@ export function renderFinalMd(state: EvaluatorState, issues: Issue[]): string {
     "",
     ...USO_RESPONSABLE.reglas.map((rule) => `- ${rule}`),
     "",
+    "El presupuesto cuenta llamadas a los agentes revisores (driver calls), no peticiones a portales.",
+    "",
     `**Revisión:** ${date} — ${state.rubricVersion}; ${counts.claims} afirmación(es), ${
       issues.length
     } issue(s), ${counts.blockers} bloqueante(s).`,
@@ -192,8 +207,12 @@ export function renderFinalMd(state: EvaluatorState, issues: Issue[]): string {
 
 // Single-file HTML: counters + claims table + issues + sources. Inline CSS,
 // no external imports, no scripts and no chart/graph library.
-export function renderHtml(state: EvaluatorState, issues: Issue[]): string {
-  const counts = countsFor(state, issues, undefined);
+export function renderHtml(
+  state: EvaluatorState,
+  issues: Issue[],
+  runStats?: RunStats,
+): string {
+  const counts = countsFor(state, issues, runStats);
   const date = reviewDate(state);
 
   const claimRows = state.claims
@@ -295,6 +314,14 @@ footer { margin-top: 2.5rem; border-top: 1px solid #8884; padding-top: .75rem; }
 </ul>
 </section>
 <section>
+<h2>Uso de esta ejecución</h2>
+<ul class="counters">
+<li><strong>peticiones acumuladas:</strong> ${counts.petitions}</li>
+<li><strong>esta ejecución:</strong> ${esc(runSpendText(counts))}</li>
+<li><strong>cache:</strong> ${esc(cacheUseText(counts))}</li>
+</ul>
+</section>
+<section>
 <h2>Afirmaciones</h2>
 ${
   state.claims.length === 0
@@ -334,6 +361,7 @@ ${sourceItems}
 <h2>Uso responsable</h2>
 <p>${esc(USO_RESPONSABLE.declaracion)}</p>
 <ul>${USO_RESPONSABLE.reglas.map((rule) => `<li>${esc(rule)}</li>`).join("")}</ul>
+<p class="meta">El presupuesto cuenta llamadas a los agentes revisores (driver calls), no peticiones a portales.</p>
 <p class="meta">Revisión ${esc(date)} — ${esc(state.rubricVersion)}; ${
     counts.claims
   } afirmación(es), ${issues.length} issue(s), ${counts.blockers} bloqueante(s).</p>
@@ -381,6 +409,7 @@ export function renderResumen(
     openIssues: counts.openIssues,
     unverifiedIssues: counts.unverifiedIssues,
     petitions: counts.petitions,
+    spentThisRun: counts.spentThisRun,
     budget: counts.budget,
     cacheHits: counts.cacheHits,
     cacheMisses: counts.cacheMisses,
@@ -401,8 +430,8 @@ export function writeOutputs(
 ): string[] {
   mkdirSync(dir, { recursive: true });
   const outputs: Array<readonly [string, string]> = [
-    [OUTPUT_FILES.md, renderFinalMd(state, issues)],
-    [OUTPUT_FILES.html, renderHtml(state, issues)],
+    [OUTPUT_FILES.md, renderFinalMd(state, issues, runStats)],
+    [OUTPUT_FILES.html, renderHtml(state, issues, runStats)],
     [OUTPUT_FILES.evidencia, renderEvidenciaJson(state)],
     [OUTPUT_FILES.resumen, renderResumen(state, issues, runStats)],
   ];
@@ -431,11 +460,24 @@ function countsFor(
       (issue) => issue.estado === "sin-re-verificar",
     ).length,
     petitions: state.petitions,
+    spentThisRun: runStats?.spentThisRun ?? null,
     budget: runStats?.budget ?? null,
     cacheHits: runStats?.cacheHits ?? null,
     cacheMisses: runStats?.cacheMisses ?? null,
     estado: closureState(issues),
   };
+}
+
+// Run-scoped spend as one deterministic label; "no medida" is the honest
+// fallback when a caller renders state without a run snapshot.
+function runSpendText(counts: Counts): string {
+  if (counts.spentThisRun === null || counts.budget === null) return "no medida";
+  return `${counts.spentThisRun} de budget ${counts.budget}`;
+}
+
+function cacheUseText(counts: Counts): string {
+  if (counts.cacheHits === null || counts.cacheMisses === null) return "no medido";
+  return `${counts.cacheHits} hit(s) / ${counts.cacheMisses} miss(es)`;
 }
 
 function closureState(issues: Issue[]): ClosureState {
