@@ -12,10 +12,10 @@ import type {
   Verdict,
 } from "./types.js";
 
-// Injected when allowFetch is empty (allowlist lives in Task 6).
+// Injected when the claim cites nothing fetchable (allowlist lives in Task 6).
 const NO_FETCH_PHRASE = "No hagas fetch: marca resultado sin-re-verificar";
 // Appended on the single retry for unparseable/invalid output.
-const RETRY_SUFFIX = "SOLO JSON, sin texto fuera del bloque";
+const RETRY_SUFFIX = "SOLO el bloque fenced ```json, sin texto fuera de él";
 const VERDICT_SCHEMA =
   '{"claimId": string, "role": string, "resultado": "ok" | "problema" | ' +
   '"sin-re-verificar", "severidad": "aviso" | "bloqueante", ' +
@@ -35,14 +35,18 @@ function failureVerdict(call: AgentCall): Verdict {
   };
 }
 
-// Prompt = rubric + material + the JSON-only schema instruction, with the
+// Prompt = rubric + material + the fenced JSON schema instruction, with the
 // no-fetch phrase when the allowlist is empty (or the resolved allowlist
-// otherwise), plus the retry suffix on the second attempt.
+// otherwise), plus the retry suffix on the second attempt. The wording mirrors
+// the rubric's output contract (exactly one fenced block) so the two prompts
+// cannot drift apart.
 function buildPrompt(call: AgentCall, retry: boolean): string {
   const parts = [
     call.rubric,
     call.material,
-    `Responde SOLO con un objeto JSON que cumpla el schema Verdict: ${VERDICT_SCHEMA}`,
+    "Responde con EXACTAMENTE un bloque fenced ```json que contenga un objeto " +
+      `JSON con el schema Verdict: ${VERDICT_SCHEMA}`,
+    "No escribas nada fuera de ese único bloque.",
   ];
   if (call.allowFetch.length === 0) {
     parts.push(NO_FETCH_PHRASE);
@@ -61,6 +65,45 @@ function lastFencedJson(stdout: string): string | undefined {
   let last: string | undefined;
   for (const match of stdout.matchAll(FENCED_JSON)) last = match[1] ?? "";
   return last;
+}
+
+// Fallback for a backend that answers with a bare JSON object: scan stdout
+// backwards and return the last balanced `{…}` substring that parses as a JSON
+// object. Deliberately simple (no string/escape tracking): the Verdict schema
+// is flat, and a wrong candidate is simply rejected by parseVerdict and retried.
+function lastBareJsonObject(stdout: string): string | undefined {
+  let end = stdout.lastIndexOf("}");
+  while (end >= 0) {
+    let depth = 0;
+    for (let start = end; start >= 0; start -= 1) {
+      const char = stdout[start];
+      if (char === "}") depth += 1;
+      else if (char === "{") {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = stdout.slice(start, end + 1);
+          try {
+            const value: unknown = JSON.parse(candidate);
+            if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+              return candidate;
+            }
+          } catch {
+            // not JSON: keep scanning for an earlier candidate
+          }
+          break;
+        }
+      }
+    }
+    end = end === 0 ? -1 : stdout.lastIndexOf("}", end - 1);
+  }
+  return undefined;
+}
+
+// Structured-output extraction: a fenced block always wins; a bare JSON object
+// is the documented fallback, and plain prose is discarded (parse failure).
+function extractVerdictJson(stdout: string): string | undefined {
+  const fenced = lastFencedJson(stdout);
+  return fenced !== undefined ? fenced : lastBareJsonObject(stdout);
 }
 
 // Literal sets accepted by the manual Verdict validation. Exported so the
@@ -173,7 +216,7 @@ export function opencodeDriver(
       if (code !== 0) {
         return { verdicts: [failureVerdict(call)], calls: 1 };
       }
-      const json = lastFencedJson(stdout);
+      const json = extractVerdictJson(stdout);
       if (json !== undefined) {
         const verdict = parseVerdict(json, call.role);
         if (verdict !== undefined) return { verdicts: [verdict], calls: attempt + 1 };

@@ -11,9 +11,10 @@ import {
   opencodeDriver,
 } from "../src/driver/opencode.js";
 import type { AgentCall, SpawnFn } from "../src/driver/types.js";
+import { DEFAULT_ROLES, rubricFor } from "../src/rubric.js";
 
 const NO_FETCH_PHRASE = "No hagas fetch: marca resultado sin-re-verificar";
-const RETRY_SUFFIX = "SOLO JSON, sin texto fuera del bloque";
+const RETRY_SUFFIX = "SOLO el bloque fenced ```json, sin texto fuera de él";
 
 // Scripted fake: each spawn consumes the next segment; prompts are recorded.
 function scriptedRun(script: Array<{ stdout: string; code: number }>): {
@@ -67,6 +68,10 @@ function fenced(text: string): string {
   return "```json\n" + text + "\n```";
 }
 
+function stripFence(fencedText: string): string {
+  return fencedText.replace(/^```json\n/, "").replace(/\n```$/, "");
+}
+
 // Polling helpers for the real-subprocess abort test (fast, hermetic).
 async function waitFor<T>(probe: () => T | undefined): Promise<T> {
   const deadline = Date.now() + 2000;
@@ -97,6 +102,41 @@ function isDead(pid: number): boolean {
 }
 
 describe("opencode driver", () => {
+  it("(a2) accepts a bare JSON object with no fence, calls: 1 (no retry)", async () => {
+    const { run, calls } = scriptedRun([
+      { stdout: JSON.stringify(JSON.parse(stripFence(verdictJson()))), code: 0 },
+    ]);
+    const result = await opencodeDriver("opencode", run)(baseCall);
+
+    expect(calls).toHaveLength(1);
+    expect(result.calls).toBe(1);
+    expect(result.verdicts[0]?.resultado).toBe("problema");
+    expect(result.verdicts[0]?.claimId).toBe("claim-driver-test");
+  });
+
+  it("(a3) inline fenced block + bare JSON ⇒ the fenced block wins", async () => {
+    const fencedOut = verdictJson({ claimId: "claim-fenced" });
+    const bareOut = JSON.stringify(JSON.parse(stripFence(verdictJson({ claimId: "claim-bare" }))));
+    const { run, calls } = scriptedRun([
+      { stdout: `prosa inicial\n${fencedOut}\nprosa final\n${bareOut}\n`, code: 0 },
+    ]);
+    const result = await opencodeDriver("opencode", run)(baseCall);
+
+    expect(calls).toHaveLength(1);
+    expect(result.verdicts[0]?.claimId).toBe("claim-fenced");
+  });
+
+  it("(a4) valid JSON preceded by prose only ⇒ parses via the bare path", async () => {
+    const bareOut = JSON.stringify(JSON.parse(stripFence(verdictJson({ claimId: "claim-prosa" }))));
+    const { run, calls } = scriptedRun([
+      { stdout: `Aquí está mi veredicto:\n${bareOut}\nGracias.\n`, code: 0 },
+    ]);
+    const result = await opencodeDriver("opencode", run)(baseCall);
+
+    expect(calls).toHaveLength(1);
+    expect(result.verdicts[0]?.claimId).toBe("claim-prosa");
+  });
+
   it("(a) parses the LAST fenced json block, fields intact, calls: 1", async () => {
     const { run, calls } = scriptedRun([
       {
@@ -259,5 +299,22 @@ describe("opencode driver", () => {
       controller.signal,
     );
     expect(result.code).not.toBe(0);
+  });
+
+  // Consensus contract (Critical 1): the rubric and the driver must describe
+  // the SAME output protocol. The rubric once demanded "no fences" while the
+  // driver only read fenced blocks, so every real call would have retried and
+  // then failed. Pin the shared wording here so the two cannot drift again.
+  it("(k) rubric and driver agree on exactly one fenced ```json block", async () => {
+    for (const role of DEFAULT_ROLES) {
+      const rubric = rubricFor(role);
+      expect(rubric).toContain("```json");
+      expect(rubric.toLowerCase()).toContain("exactly one fenced");
+      expect(rubric).not.toMatch(/no fences/i);
+    }
+
+    const { run, prompts } = scriptedRun([{ stdout: verdictJson(), code: 0 }]);
+    await opencodeDriver("opencode", run)(baseCall);
+    expect(prompts[0]).toContain("```json");
   });
 });

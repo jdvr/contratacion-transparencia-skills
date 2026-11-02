@@ -179,12 +179,16 @@ const VERDICT_CONTRACT = `## Verdict
 - Fetch restriction: you may only fetch URLs inside your allowlist (given to
   you by the driver); everything else stays unfetched and human-decided.
 
-Your entire final output must be a single JSON object with exactly these
-fields and no others:
+Your entire final answer must be EXACTLY one fenced \`\`\`json block containing a
+single JSON object with exactly these fields and no others, and nothing else
+outside that one fence:
+\`\`\`json
 {"claimId": string, "role": string, "resultado": "ok"|"problema"|"sin-re-verificar", "severidad": "aviso"|"bloqueante", "hallazgo": string, "evidencia": string[]}
+\`\`\`
 
 Echo "claimId" from the claim's "id" and use your own role id for "role".
-No prose, no fences, no trailing text.`;
+No prose, no second block and no trailing text outside the single fenced
+block.`;
 
 // Returns the full prompt for one role: shared framing, the role's one check
 // and the verdict contract. Unknown ids throw (runtime guard over the typed
