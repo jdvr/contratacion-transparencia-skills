@@ -16,8 +16,15 @@
 // treated exactly like a driver failure: it becomes an issue-able
 // `sin-re-verificar` / `bloqueante` verdict and marks the claim `recheck`, so
 // nothing throws out of runEval and a later run resumes from state.
+//
+// Fase 3bis — request budget (Task 9): before each driver call, an exhausted
+// Budget (`spent + 1 > max`) stops the review instead of aborting it. The
+// claim/role pair stays unbuilt, the claim is marked `recheck:
+// "presupuesto-agotado"` and the run exits 1 with that declared gap; a later
+// run with enough budget re-drives only the pairs that were never reviewed.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Budget } from "./budget.js";
 import { VerdictCache } from "./cache.js";
 import type { Claim } from "./contract.js";
 import type { AgentCall, AgentResult, Driver, Verdict } from "./driver/types.js";
@@ -31,7 +38,9 @@ import { contentHash } from "./state.js";
 // verdicts produced (one per role in v1, but the driver may return several per
 // call). `recheck` is the declared gap that keeps exit 0 closed: it is set when
 // any verdict is "sin-re-verificar" (driver failure / timeout / unreachable
-// source) and will also carry "presupuesto-agotado" once Task 9 lands.
+// source) and, taken by the request budget before a pair could run, as
+// "presupuesto-agotado" (Fase 3bis). The per-pair gap is the absence of that
+// role's verdict under the marker; Task 10 turns it into an issue.
 export interface RecordedClaim {
   claim: Claim;
   hash: string;
@@ -157,7 +166,9 @@ export interface RunEvalOptions {
   outDir?: string; // reserved for Task 11 outputs; not consumed here
   roles?: RoleId[];
   noCache?: boolean;
-  budget: number; // reserved for Task 9; accepted but not enforced yet
+  // Petitions this run may spend on driver calls (default comes from
+  // `.evaluador/config.json`, overridable with `--budget N`).
+  budget: number;
   driver: Driver;
   cwd: string;
   // Per-call driver timeout (tests inject a small value).
@@ -202,6 +213,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   }
 
   const previous = loadState(stateDir);
+  const budget = new Budget(opts.budget);
   // A state from another schema or rubric version is not resumable; cache keys
   // already include RUBRIC_VERSION, so those verdicts miss and get re-reviewed.
   const resumable =
@@ -227,13 +239,19 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
       resumable && recorded !== undefined && recorded.hash === hash
         ? recorded
         : undefined;
-    // Any recheck forces the claim's roles through the driver again, bypassing
-    // both state and cache (the previous verdicts must not mask the retry).
+    // A `sin-re-verificar` recheck forces every role of the claim through the
+    // driver again, bypassing both state and cache (the previous verdicts must
+    // not mask the retry). A `presupuesto-agotado` recheck is a pause, not a
+    // failure: verdicts already obtained are valid and are adopted, and only
+    // the role pairs the budget never reached go to the driver — resuming
+    // "justo donde se quedó" without re-billing reviewed pairs.
     const recheck = reusable?.recheck;
+    const bypass = recheck === "sin-re-verificar";
     const verdicts: Verdict[] = [];
+    let budgetGap = false;
 
     for (const role of roles) {
-      if (!opts.noCache && recheck === undefined) {
+      if (!opts.noCache && !bypass) {
         const prior =
           reusable?.verdicts.filter((verdict) => verdict.role === role) ?? [];
         if (prior.length > 0) {
@@ -245,6 +263,14 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
           verdicts.push(cached);
           continue;
         }
+      }
+
+      // Fase 3bis: the budget gate sits between the miss and the driver.
+      // `exhausted` is exactly `spent + 1 > max`, so no call is made; the pair
+      // stays unbuilt and the claim declares the gap.
+      if (budget.exhausted) {
+        budgetGap = true;
+        continue;
       }
 
       const call: AgentCall = {
@@ -278,23 +304,30 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
       }
       cacheDirty = true;
       verdicts.push(...assigned);
+      // Post-call accounting charges the real spawns (1, or 2 with retry). A
+      // retry arriving with one petition left is accepted: the counter caps at
+      // max and `petitions` keeps the one-call overshoot declared.
+      budget.take(result.calls);
       petitions += result.calls;
     }
 
     const next: RecordedClaim = { claim, hash, verdicts };
     if (verdicts.some((verdict) => verdict.resultado === "sin-re-verificar")) {
       next.recheck = "sin-re-verificar";
+    } else if (budgetGap) {
+      next.recheck = "presupuesto-agotado";
     }
     claims.push(next);
   }
 
   // Semantics 4: exit 0 only with zero blockers and honest labels on every
-  // claim; a warning alone never blocks closure. (An unverified verdict from a
-  // driver failure/timeout is itself `bloqueante`, so it keeps the gate closed;
-  // Task 9 adds the budget-gap rule.)
+  // claim; a warning alone never blocks closure. A declared gap (driver
+  // failure/timeout or a budget pause) also keeps the gate closed: exit 0 is
+  // "sin huecos".
   const anyBlocking = claims.some((recorded) =>
     recorded.verdicts.some((verdict) => verdict.severidad === "bloqueante"),
   );
+  const anyGap = claims.some((recorded) => recorded.recheck !== undefined);
   const allHonest = claims.every((recorded) =>
     HONEST_LABELS.has(recorded.claim.etiqueta),
   );
@@ -311,7 +344,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   if (cacheDirty) cache.save();
 
   return {
-    code: anyBlocking || !allHonest ? 1 : 0,
+    code: anyBlocking || !allHonest || anyGap ? 1 : 0,
     state,
   };
 }

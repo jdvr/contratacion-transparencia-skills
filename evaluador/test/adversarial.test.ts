@@ -3,7 +3,7 @@
 // `opencode` binary, no network, no subprocess — and every tempdir is removed
 // in `afterAll`. Fixtures are generated (fictitious) and pass the structural
 // gate, so each scenario exercises orchestration, not the gate's rejections.
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -144,6 +144,28 @@ function recordedClaim(state: EvaluatorState, id: string) {
   const found = state.claims.find((rc) => rc.claim.id === id);
   if (found === undefined) throw new Error(`missing recorded claim ${id}`);
   return found;
+}
+
+// The claim/role pairs left unbuilt by the budget: a claim carries the
+// `presupuesto-agotado` marker and the pair simply has no verdict. This is the
+// exact state representation Task 10 turns into issues.
+function gapPairs(
+  state: EvaluatorState,
+  roles: readonly RoleId[],
+): Array<{ claim: string; role: RoleId }> {
+  return state.claims.flatMap((rc) =>
+    rc.recheck === "presupuesto-agotado"
+      ? roles
+          .filter((role) => !rc.verdicts.some((verdict) => verdict.role === role))
+          .map((role) => ({ claim: rc.claim.id, role }))
+      : [],
+  );
+}
+
+// `claim/role` pair of one driver call, read from the serialized material.
+function callPair(call: AgentCall): string {
+  const id = /"id": "([^"]+)"/.exec(call.material)?.[1] ?? "?";
+  return `${id}/${call.role}`;
 }
 
 // Silences CLI output so the suite stays pristine.
@@ -309,8 +331,98 @@ describe("runEval", () => {
     expect(recordedClaim(second.state, "claim-c2").recheck).toBeUndefined();
   });
 
-  it("noCache forces a complete re-review (12 calls) even with state + cache", async () => {
+  it("(f) budget 5 of 12: five calls, gap pairs marked presupuesto-agotado, code 1", async () => {
     const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const result = await runEval(evalOpts(session, driver, { budget: 5 }));
+
+    expect(result.code).toBe(1);
+    expect(calls).toHaveLength(5);
+    // Documents execute claim by claim, role by role; the budget cuts mid-claim.
+    expect(calls.map((call) => callPair(call))).toEqual([
+      "claim-c1/contadores",
+      "claim-c1/segunda-fuente",
+      "claim-c1/falsificador",
+      "claim-c1/metodico",
+      "claim-c2/contadores",
+    ]);
+    expect(result.state.petitions).toBe(5);
+
+    // The fully reviewed claim has no marker; the two cut claims carry the
+    // declared gap, and only truly unbuilt pairs are missing verdicts.
+    expect(recordedClaim(result.state, "claim-c1").recheck).toBeUndefined();
+    expect(recordedClaim(result.state, "claim-c1").verdicts).toHaveLength(4);
+    expect(recordedClaim(result.state, "claim-c2").recheck).toBe("presupuesto-agotado");
+    expect(recordedClaim(result.state, "claim-c2").verdicts).toHaveLength(1);
+    expect(recordedClaim(result.state, "claim-c3").recheck).toBe("presupuesto-agotado");
+    expect(recordedClaim(result.state, "claim-c3").verdicts).toHaveLength(0);
+    expect(gapPairs(result.state, DEFAULT_ROLES)).toEqual([
+      { claim: "claim-c2", role: "segunda-fuente" },
+      { claim: "claim-c2", role: "falsificador" },
+      { claim: "claim-c2", role: "metodico" },
+      { claim: "claim-c3", role: "contadores" },
+      { claim: "claim-c3", role: "segunda-fuente" },
+      { claim: "claim-c3", role: "falsificador" },
+      { claim: "claim-c3", role: "metodico" },
+    ]);
+    // The pause is resumable: the declared gap is persisted, not in memory only.
+    expect(loadState(stateDir(session))).toEqual(result.state);
+  });
+
+  it("(g) re-run with enough budget reviews exactly the seven gap pairs, code 0", async () => {
+    const session = newSession();
+    const first = await runEval(evalOpts(session, okDriver().driver, { budget: 5 }));
+    expect(first.code).toBe(1);
+
+    const { driver, calls } = okDriver();
+    const second = await runEval(evalOpts(session, driver, { budget: 20 }));
+
+    expect(second.code).toBe(0);
+    expect(calls).toHaveLength(7);
+    expect(calls.map((call) => callPair(call))).toEqual([
+      "claim-c2/segunda-fuente",
+      "claim-c2/falsificador",
+      "claim-c2/metodico",
+      "claim-c3/contadores",
+      "claim-c3/segunda-fuente",
+      "claim-c3/falsificador",
+      "claim-c3/metodico",
+    ]);
+    expect(second.state.petitions).toBe(12); // 5 + 7 actual driver calls
+    expect(gapPairs(second.state, DEFAULT_ROLES)).toEqual([]);
+    for (const rc of second.state.claims) {
+      expect(rc.recheck).toBeUndefined();
+      expect(rc.verdicts).toHaveLength(4);
+    }
+  });
+
+  it("accepts a driver retry overshoot by one, then pauses the next pair", async () => {
+    const session = newSession([baseClaim("claim-retry")]);
+    const { driver, calls } = countingDriver((call) => ({
+      verdicts: [okVerdict(call)],
+      calls: 2, // normal call + the single structured-output retry
+    }));
+
+    const result = await runEval({
+      ...evalOpts(session, driver, { budget: 1 }),
+      roles: ["contadores", "metodico"],
+    });
+
+    expect(result.code).toBe(1);
+    expect(calls).toHaveLength(1); // the accepted retry did not authorise more
+    // The two real spawns stay declared in the manifest even though the
+    // counter caps at max.
+    expect(result.state.petitions).toBe(2);
+    const rc = recordedClaim(result.state, "claim-retry");
+    expect(rc.verdicts.map((verdict) => verdict.role)).toEqual(["contadores"]);
+    expect(rc.recheck).toBe("presupuesto-agotado");
+    expect(gapPairs(result.state, ["contadores", "metodico"])).toEqual([
+      { claim: "claim-retry", role: "metodico" },
+    ]);
+  });
+
+  it("noCache forces a complete re-review (12 calls) even with state + cache", async () => {    const session = newSession();
     await runEval(evalOpts(session, okDriver().driver));
 
     const { driver, calls } = okDriver();
@@ -511,6 +623,82 @@ describe("cli eval wiring", () => {
     expect(
       await quietly(() => main(["eval", join(newTempDir(), "que-no-existe.md")])),
     ).toBe(3);
+  });
+
+  it("--budget N plumbs to runEval and fails closed with a declared gap", async () => {
+    const session = newSession();
+    const limited = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath, "--budget", "5"], {
+        driver: limited.driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    expect(code).toBe(1);
+    expect(limited.calls).toHaveLength(5);
+    const paused = loadState(stateDir(session));
+    expect(paused).not.toBeNull();
+    if (paused === null) throw new Error("state.json should exist after the pause");
+    expect(gapPairs(paused, DEFAULT_ROLES)).toHaveLength(7);
+  });
+
+  it("without a flag, a missing config fails open to the default 20", async () => {
+    const session = newSession(); // no .evaluador/config.json at all
+    const { driver, calls } = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath], { driver, cwd: session.cwd }),
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toHaveLength(12); // 12 ≤ 20: the default allowed the whole run
+  });
+
+  it("a valid config budget is the default without a flag", async () => {
+    const session = newSession();
+    const dotDir = stateDir(session);
+    mkdirSync(dotDir, { recursive: true });
+    writeFileSync(join(dotDir, "config.json"), JSON.stringify({ budget: 2 }));
+
+    const { driver, calls } = okDriver();
+    const code = await quietly(() =>
+      main(["eval", session.reportPath], { driver, cwd: session.cwd }),
+    );
+
+    expect(code).toBe(1);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a corrupt config fails open to the default 20", async () => {
+    const session = newSession();
+    const dotDir = stateDir(session);
+    mkdirSync(dotDir, { recursive: true });
+    writeFileSync(join(dotDir, "config.json"), "{no es json");
+
+    const { driver, calls } = okDriver();
+    const code = await quietly(() =>
+      main(["eval", session.reportPath], { driver, cwd: session.cwd }),
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toHaveLength(12);
+  });
+
+  it("an invalid --budget value is a usage error (exit 3, no driver call)", async () => {
+    const session = newSession();
+    const { driver, calls } = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath, "--budget", "muchas"], {
+        driver,
+        cwd: session.cwd,
+      }),
+    );
+
+    expect(code).toBe(3);
+    expect(calls).toHaveLength(0);
   });
 });
 

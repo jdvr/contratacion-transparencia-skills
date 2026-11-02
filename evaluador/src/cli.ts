@@ -3,6 +3,7 @@
 // declared gap, 2 = structural gate failed, 3 = usage / unreadable report.
 // See docs/superpowers/specs/2026-10-31-evaluador-design.md.
 import { readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runEval } from "./adversarial.js";
 import { opencodeDriver } from "./driver/opencode.js";
@@ -12,6 +13,10 @@ import { initScripted } from "./init.js";
 const EXIT_OK = 0;
 const EXIT_UNKNOWN_COMMAND = 3;
 const EXIT_GATE_FAILED = 2;
+
+// Request budget used when no `--budget` flag is given and `.evaluador/config.json`
+// is missing, unreadable or corrupt: fail open to init's documented default.
+const DEFAULT_BUDGET = 20;
 
 // Test seam over the real process: the CLI defaults to the real driver and the
 // process cwd, while tests inject a fake driver and a tempdir. Keeps the
@@ -29,17 +34,30 @@ async function runInit(_args: string[]): Promise<number> {
   return initScripted(process.cwd(), (s) => process.stdout.write(s));
 }
 
-// eval <file> [--no-cache]: runs the structural gate and, when it passes, the
-// adversarial phases via runEval. The process exit code is runEval's own (0/1),
-// gate failure stays 2 (gaps JSON on stdout for the invoking model), and an
-// unreadable report is a usage error (3). Full report artifacts arrive in
-// Task 11, so 0/1 are exit-only for now.
+// eval <file> [--no-cache] [--budget N]: runs the structural gate and, when it
+// passes, the adversarial phases via runEval. The process exit code is runEval's
+// own (0/1), gate failure stays 2 (gaps JSON on stdout for the invoking model),
+// and an unreadable report or a malformed flag is a usage error (3). Full report
+// artifacts arrive in Task 11, so 0/1 are exit-only for now.
 async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
   let noCache = false;
+  let budgetOverride: number | undefined;
   const positional: string[] = [];
-  for (const arg of args) {
-    if (arg === "--no-cache") noCache = true;
-    else positional.push(arg);
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? "";
+    if (arg === "--no-cache") {
+      noCache = true;
+    } else if (arg === "--budget") {
+      const value = args[i + 1];
+      if (value === undefined || !/^\d+$/.test(value)) {
+        console.error("evaluador: --budget requires a non-negative integer");
+        return EXIT_UNKNOWN_COMMAND;
+      }
+      budgetOverride = Number(value);
+      i += 1;
+    } else {
+      positional.push(arg);
+    }
   }
 
   const file = positional[0];
@@ -58,8 +76,7 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
     const result = await runEval({
       reportPath: file,
       noCache,
-      // Task 9 wires the config/--budget value; accepted but not enforced yet.
-      budget: 20,
+      budget: budgetOverride ?? loadBudget(deps.cwd ?? process.cwd()),
       driver: deps.driver ?? opencodeDriver(),
       cwd: deps.cwd ?? process.cwd(),
       timeoutMs: deps.timeoutMs,
@@ -83,13 +100,34 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
   }
 }
 
+// Reads the per-run budget from `<cwd>/.evaluador/config.json` (created by
+// `init` as `{"budget": 20}`). A missing, unreadable or corrupt file — or a
+// non-integer/negative value — fails open to DEFAULT_BUDGET: a broken config
+// must not silently disable the review or allow an unbounded run.
+function loadBudget(cwd: string): number {
+  try {
+    const raw: unknown = JSON.parse(
+      readFileSync(join(cwd, ".evaluador", "config.json"), "utf8"),
+    );
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      const value = (raw as Record<string, unknown>).budget;
+      if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+        return value;
+      }
+    }
+  } catch {
+    // Fall through to the default (fail-open, documented above).
+  }
+  return DEFAULT_BUDGET;
+}
+
 function printUsage(): void {
   const lines = [
     "Usage: evaluador <command> [args]",
     "",
     "Commands:",
     "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [--no-cache]  Run the structural gate and adversarial review",
+    "  eval <file> [--no-cache] [--budget N]  Run the structural gate and adversarial review",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));
