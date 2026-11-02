@@ -34,17 +34,20 @@ async function runInit(_args: string[]): Promise<number> {
   return initScripted(process.cwd(), (s) => process.stdout.write(s));
 }
 
-// eval <file> [--no-cache] [--budget N] [--git-branches]: runs the structural
-// gate and, when it passes, the adversarial phases via runEval. The process exit
-// code is runEval's own (0/1), gate failure stays 2 (gaps JSON on stdout for the
-// invoking model), and an unreadable report or a malformed flag is a usage error
-// (3). Issue artifacts are written by runEval (Task 10); `--git-branches` (off
-// by default in v1) additionally creates `problema/<claimId>` for blocking
-// verdicts, with git failures degraded to warnings.
+// eval <file> [-o <dir>] [--no-cache] [--budget N] [--git-branches]: runs the
+// structural gate and, when it passes, the adversarial phases via runEval. The
+// process exit code is runEval's own (0/1), gate failure stays 2 (gaps JSON on
+// stdout for the invoking model), and an unreadable report or a malformed flag
+// is a usage error (3). Issue artifacts are written by runEval (Task 10); the
+// four final outputs (Task 11) land in `-o <dir>` or next to the report;
+// `--git-branches` (off by default in v1) additionally creates
+// `problema/<claimId>` for blocking verdicts, with git failures degraded to
+// warnings. stdout stays reserved for the JSON status of a gate failure.
 async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
   let noCache = false;
   let gitBranches = false;
   let budgetOverride: number | undefined;
+  let outDir: string | undefined;
   const positional: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] ?? "";
@@ -52,6 +55,14 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
       noCache = true;
     } else if (arg === "--git-branches") {
       gitBranches = true;
+    } else if (arg === "-o") {
+      const value = args[i + 1];
+      if (value === undefined || value === "") {
+        console.error("evaluador: -o requires an output directory");
+        return EXIT_UNKNOWN_COMMAND;
+      }
+      outDir = value;
+      i += 1;
     } else if (arg === "--budget") {
       const value = args[i + 1];
       if (value === undefined || !/^\d+$/.test(value)) {
@@ -80,6 +91,7 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
   try {
     const result = await runEval({
       reportPath: file,
+      outDir,
       noCache,
       budget: budgetOverride ?? loadBudget(deps.cwd ?? process.cwd()),
       driver: deps.driver ?? opencodeDriver(),
@@ -133,7 +145,7 @@ function printUsage(): void {
     "",
     "Commands:",
     "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [--no-cache] [--budget N] [--git-branches]  Run the structural gate and adversarial review",
+    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--git-branches]  Run the structural gate and adversarial review",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));

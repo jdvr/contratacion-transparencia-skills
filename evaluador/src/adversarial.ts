@@ -29,8 +29,15 @@
 // artifacts add no new code. The opt-in `gitBranches` flag opens
 // `problema/<claimId>` only for claims with a blocking verdict; git failures
 // are warnings and never change the exit code.
+//
+// Final outputs (Task 11): the same completed/paused path renders and writes
+// `reporte-final.md`, `reporte-final.html`, `evidencia.json` and `resumen.json`
+// into `outDir` (default: the report's own directory). The result carries the
+// run-scoped accounting those artifacts need (`budget`, `spentThisRun`,
+// `cacheHits`, `cacheMisses`) because `state.petitions` is cumulative across
+// resumed runs.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Budget } from "./budget.js";
 import { VerdictCache } from "./cache.js";
 import type { Claim } from "./contract.js";
@@ -38,6 +45,8 @@ import type { AgentCall, AgentResult, Driver, Verdict } from "./driver/types.js"
 import { runGate } from "./gate.js";
 import type { Gap } from "./gate.js";
 import { createIssueBranches, writeIssues } from "./issues.js";
+import { writeOutputs } from "./report.js";
+import type { RunStats } from "./report.js";
 import { DEFAULT_ROLES, RUBRIC_VERSION, resolveFetch, rubricFor } from "./rubric.js";
 import type { RoleId } from "./rubric.js";
 import { contentHash } from "./state.js";
@@ -177,7 +186,10 @@ function isEvaluatorState(value: unknown): value is EvaluatorState {
 
 export interface RunEvalOptions {
   reportPath: string;
-  outDir?: string; // reserved for Task 11 outputs; not consumed here
+  // Directory for the Task 11 artifacts (`reporte-final.md`, `.html`,
+  // `evidencia.json`, `resumen.json`). Defaults to the report's own directory.
+  // Relative values are resolved against `cwd`, like every other run path.
+  outDir?: string;
   roles?: RoleId[];
   noCache?: boolean;
   // Petitions this run may spend on driver calls (default comes from
@@ -192,10 +204,19 @@ export interface RunEvalOptions {
   gitBranches?: boolean;
 }
 
+// Run-scoped accounting for the final summary (Task 11 carry #3): `state`
+// preserves cumulative petitions, so this snapshot tells the renderers what
+// THIS run spent and how much of it the cache served. `budget` is the run's
+// declared cap; a gate failure or an empty-roles refusal still reports it with
+// zero spending.
 export interface RunEvalResult {
   code: 0 | 1 | 2 | 3;
   gaps?: Gap[];
   state: EvaluatorState;
+  budget: number;
+  spentThisRun: number;
+  cacheHits: number;
+  cacheMisses: number;
 }
 
 // Runs the phases for one report. Reads the report as text (an unreadable file
@@ -222,6 +243,10 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         roles,
         new Date().toISOString(),
       ),
+      budget: opts.budget,
+      spentThisRun: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
     };
   }
 
@@ -236,6 +261,10 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         roles,
         new Date().toISOString(),
       ),
+      budget: opts.budget,
+      spentThisRun: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
     };
   }
 
@@ -256,7 +285,15 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
 
   const cache = new VerdictCache(join(stateDir, CACHE_FILE));
   const claims: RecordedClaim[] = [];
-  let petitions = resumable ? previous.petitions : 0;
+  const startPetitions = resumable ? previous.petitions : 0;
+  let petitions = startPetitions;
+  // Per-run cache accounting (Task 11): one unit per claim × role pair, so
+  // hits + misses is the review surface of THIS run. A pair whose verdicts are
+  // adopted from state or the verdict cache is a hit; a pair that must reach
+  // the driver is a miss (including one the budget then leaves unbuilt, and
+  // every pair under --no-cache: the cache did not serve it).
+  let cacheHits = 0;
+  let cacheMisses = 0;
   let cacheDirty = false;
 
   for (const claim of gate.claims) {
@@ -282,15 +319,19 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         const prior =
           reusable?.verdicts.filter((verdict) => verdict.role === role) ?? [];
         if (prior.length > 0) {
+          cacheHits += 1;
           verdicts.push(...prior);
           continue;
         }
         const cached = cache.get(hash, role);
         if (cached !== undefined) {
+          cacheHits += 1;
           verdicts.push(cached);
           continue;
         }
       }
+
+      cacheMisses += 1;
 
       // Fase 3bis: the budget gate sits between the miss and the driver.
       // `exhausted` is exactly `spent + 1 > max`, so no call is made; the pair
@@ -383,14 +424,33 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   // (opt-in) open one branch per claim with a blocking verdict. Git failures
   // are warnings inside createIssueBranches and cannot change `code`.
   const allVerdicts = claims.flatMap((recorded) => recorded.verdicts);
-  writeIssues(stateDir, allVerdicts, state);
+  const issues = writeIssues(stateDir, allVerdicts, state);
   if (opts.gitBranches === true) {
     createIssueBranches(opts.cwd, allVerdicts);
   }
 
+  // Task 11: the four final artifacts are written next to the report by
+  // default, or under `-o <dir>`. A relative outDir is resolved against the
+  // run's cwd (not the process cwd), so an embedded run never escapes its
+  // working directory; writeOutputs does the mkdir -p. I/O failures propagate
+  // and the CLI maps them to exit 3, like state/cache writes.
+  const outDir = resolve(opts.cwd, opts.outDir ?? dirname(opts.reportPath));
+  const spentThisRun = petitions - startPetitions;
+  const runStats: RunStats = {
+    budget: opts.budget,
+    spentThisRun,
+    cacheHits,
+    cacheMisses,
+  };
+  writeOutputs(outDir, state, issues, runStats);
+
   return {
     code: anyBlocking || !allHonest || anyGap ? 1 : 0,
     state,
+    budget: opts.budget,
+    spentThisRun,
+    cacheHits,
+    cacheMisses,
   };
 }
 
