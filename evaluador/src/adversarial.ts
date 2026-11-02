@@ -303,26 +303,41 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
       resumable && recorded !== undefined && recorded.hash === hash
         ? recorded
         : undefined;
-    // A `sin-re-verificar` recheck forces every role of the claim through the
-    // driver again, bypassing both state and cache (the previous verdicts must
-    // not mask the retry). A `presupuesto-agotado` recheck is a pause, not a
-    // failure: verdicts already obtained are valid and are adopted, and only
-    // the role pairs the budget never reached go to the driver — resuming
-    // "justo donde se quedó" without re-billing reviewed pairs.
+    // Resume semantics (Task 8 + final-review fix):
+    //  - `sin-re-verificar` is a PER-ROLE retry: only roles whose last verdict
+    //    was `sin-re-verificar` (or that never got one) reach the driver. Every
+    //    other verdict is preserved, so a prior blocker can never vanish just
+    //    because a retry was attempted (or the retry died on budget).
+    //  - `presupuesto-agotado` / `interrumpido` are pauses: the verdicts already
+    //    obtained are adopted and only the missing role pairs are re-driven.
+    //  - A subset run (`--roles`) never prunes verdicts of roles it did not
+    //    request: those are carried over untouched.
     const recheck = reusable?.recheck;
-    const bypass = recheck === "sin-re-verificar";
-    const verdicts: Verdict[] = [];
+    const retryClaim = recheck === "sin-re-verificar";
+    const prior = reusable?.verdicts ?? [];
+    const requested = new Set<RoleId>(roles);
+    const verdicts: Verdict[] = prior.filter(
+      (verdict) => !requested.has(verdict.role as RoleId),
+    );
     let budgetGap = false;
 
     for (const role of roles) {
-      if (!opts.noCache && !bypass) {
-        const prior =
-          reusable?.verdicts.filter((verdict) => verdict.role === role) ?? [];
-        if (prior.length > 0) {
-          cacheHits += 1;
-          verdicts.push(...prior);
-          continue;
-        }
+      const priorForRole = prior.filter((verdict) => verdict.role === role);
+      const retryRole =
+        retryClaim &&
+        (priorForRole.length === 0 ||
+          priorForRole.some((verdict) => verdict.resultado === "sin-re-verificar"));
+      // A completed prior review (or a cache hit) is adopted unless this role
+      // is under a `sin-re-verificar` retry — its failed verdict must not mask
+      // the retry — or `--no-cache` forces a full re-review.
+      const canAdopt = !opts.noCache && !retryRole;
+
+      if (canAdopt && priorForRole.length > 0) {
+        cacheHits += 1;
+        verdicts.push(...priorForRole);
+        continue;
+      }
+      if (canAdopt) {
         const cached = cache.get(hash, role);
         if (cached !== undefined) {
           cacheHits += 1;

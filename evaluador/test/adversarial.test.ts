@@ -375,6 +375,93 @@ describe("runEval", () => {
     expect(resolved.verdicts.every((verdict) => verdict.resultado === "ok")).toBe(true);
   });
 
+  it("(e3) a sin-re-verificar retry re-drives only the failed roles and keeps prior blockers", async () => {
+    const session = newSession([baseClaim("claim-c1")]);
+    const first = countingDriver((call) => {
+      if (call.role === "contadores") {
+        return {
+          verdicts: [
+            okVerdict(call, {
+              resultado: "problema",
+              severidad: "bloqueante",
+              hallazgo: "bloqueante ficticio de la primera pasada",
+            }),
+          ],
+          calls: 1,
+        };
+      }
+      if (call.role === "segunda-fuente") {
+        return {
+          verdicts: [
+            okVerdict(call, {
+              resultado: "sin-re-verificar",
+              severidad: "bloqueante",
+              hallazgo: "no re-verificado en la primera pasada",
+            }),
+          ],
+          calls: 1,
+        };
+      }
+      return { verdicts: [okVerdict(call)], calls: 1 };
+    });
+
+    const run1 = await runEval(evalOpts(session, first.driver));
+    expect(run1.code).toBe(1);
+    expect(recordedClaim(run1.state, "claim-c1").recheck).toBe("sin-re-verificar");
+
+    // Run 2: every role returns ok. Only segunda-fuente (the role whose last
+    // verdict was sin-re-verificar) may reach the driver.
+    const second = okDriver();
+    const run2 = await runEval(evalOpts(session, second.driver));
+
+    expect(second.calls.map((call) => call.role)).toEqual(["segunda-fuente"]);
+    expect(run2.code).toBe(1); // the prior blocker is still present
+    const rc2 = recordedClaim(run2.state, "claim-c1");
+    expect(rc2.recheck).toBeUndefined();
+    const contadores = rc2.verdicts.find((verdict) => verdict.role === "contadores");
+    expect(contadores?.resultado).toBe("problema");
+    expect(contadores?.severidad).toBe("bloqueante");
+    const segunda = rc2.verdicts.find((verdict) => verdict.role === "segunda-fuente");
+    expect(segunda?.resultado).toBe("ok"); // replaced only for the re-driven role
+    expect(rc2.verdicts).toHaveLength(4);
+
+    // Run 3: state deleted, cache replay. The non-re-driven roles were never
+    // overwritten, so the blocker survives from the cache instead of a stale
+    // "ok" resurrecting a false closure.
+    rmSync(join(stateDir(session), "state.json"));
+    const third = okDriver();
+    const run3 = await runEval(evalOpts(session, third.driver));
+
+    expect(third.calls).toHaveLength(0);
+    expect(run3.code).toBe(1);
+    expect(
+      recordedClaim(run3.state, "claim-c1").verdicts.find(
+        (verdict) => verdict.role === "contadores",
+      )?.severidad,
+    ).toBe("bloqueante");
+  });
+
+  it("(e4) a subset --roles run keeps verdicts of roles it did not request", async () => {
+    const session = newSession([baseClaim("claim-c1")]);
+    await runEval(evalOpts(session, okDriver().driver));
+
+    const { driver, calls } = countingDriver((call) => ({
+      verdicts: [okVerdict(call)],
+      calls: 1,
+    }));
+    const subset = await runEval({
+      ...evalOpts(session, driver),
+      roles: ["contadores"],
+      noCache: true,
+    });
+
+    expect(calls.map((call) => call.role)).toEqual(["contadores"]);
+    const rc = recordedClaim(subset.state, "claim-c1");
+    expect(rc.verdicts.map((verdict) => verdict.role).sort()).toEqual(
+      [...DEFAULT_ROLES].sort(),
+    );
+  });
+
   it("(f) budget 5 of 12: five calls, gap pairs marked presupuesto-agotado, code 1", async () => {
     const session = newSession();
     const { driver, calls } = okDriver();
