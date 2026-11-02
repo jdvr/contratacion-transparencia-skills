@@ -794,6 +794,48 @@ describe("runEval", () => {
     ]);
   });
 
+  it("logs per-pair progress and a final summary to the injected logger", async () => {
+    const session = newSession();
+    const lines: string[] = [];
+
+    const result = await runEval(
+      evalOpts(session, okDriver().driver, {
+        logger: (line) => lines.push(line),
+        heartbeatMs: 0,
+      }),
+    );
+
+    expect(result.code).toBe(0);
+    expect(lines[0]).toContain("3 claim(s) × 4 role(s) = 12 claim×role pair(s)");
+    expect(
+      lines.some((line) => /\[1\/12\] claim-c1 · contadores: reviewing/.test(line)),
+    ).toBe(true);
+    expect(
+      lines.some((line) => /\[1\/12\] claim-c1 · contadores: ok \(aviso\) \d/.test(line)),
+    ).toBe(true);
+    expect(lines.some((line) => line.includes("done: exit 0"))).toBe(true);
+    expect(lines.some((line) => line.includes("blocker(s)"))).toBe(true);
+  });
+
+  it("emits a heartbeat while a slow driver call is in flight", async () => {
+    const session = newSession([baseClaim("claim-slow")]);
+    const lines: string[] = [];
+    const never: Driver = () => new Promise<AgentResult>(() => {});
+
+    const result = await runEval(
+      evalOpts(session, never, {
+        roles: ["contadores"],
+        timeoutMs: 40,
+        heartbeatMs: 10,
+        logger: (line) => lines.push(line),
+      }),
+    );
+
+    expect(result.code).toBe(1);
+    expect(lines.some((line) => line.includes("still running"))).toBe(true);
+    expect(lines.some((line) => line.includes("TIMEOUT"))).toBe(true);
+  });
+
   it("drops an invalid verdict literal from state and re-drives that pair", async () => {
     const session = newSession([baseClaim("claim-corrupt")]);
     const roles: RoleId[] = ["contadores", "metodico"];

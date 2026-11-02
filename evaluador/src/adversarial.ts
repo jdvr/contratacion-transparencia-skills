@@ -110,6 +110,26 @@ function claimHash(claim: Claim, model: string | undefined): string {
 // `runEval({ timeoutMs })` so tests do not wait 5 minutes.
 export const DRIVER_TIMEOUT_MS = 300_000;
 
+// Progress heartbeat while one driver call is in flight. A slow free model can
+// legitimately take minutes per call; a silent CLI makes that look like a hang,
+// so the default emits one line every 30 s (disable with heartbeatMs: 0).
+export const HEARTBEAT_MS = 30_000;
+
+// Human-readable duration for progress lines: sub-minute values keep one
+// decimal, longer ones render as `4m04s`.
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${(ms / 1000).toFixed(2)}s`;
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return Number.isInteger(seconds)
+      ? `${seconds}s`
+      : `${seconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return `${minutes}m${String(rest).padStart(2, "0")}s`;
+}
+
 // Honest cache model name (pre-flight ruling): the orchestration cannot know
 // which model `opencode run` selected, so it records what it actually did.
 // With a per-run `--model`, modelLabel appends it so a cached verdict never
@@ -236,6 +256,11 @@ export interface RunEvalOptions {
   cwd: string;
   // Per-call driver timeout (tests inject a small value).
   timeoutMs?: number;
+  // Progress sink (stderr in the CLI). Default: silent, so library callers and
+  // the test suite stay pristine unless they opt in.
+  logger?: (line: string) => void;
+  // Heartbeat cadence for in-flight calls; 0 disables it (tests).
+  heartbeatMs?: number;
   // Reviewer model for every role in this run (`--model provider/model`).
   // Undefined means the backend's own default; the value is passed verbatim.
   model?: string;
@@ -270,6 +295,16 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   const reportHash = contentHash(gate.claims);
   const roles = opts.roles ?? DEFAULT_ROLES;
   const timeoutMs = opts.timeoutMs ?? DRIVER_TIMEOUT_MS;
+  const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
+  const runStartedAt = Date.now();
+  // A progress logger must never break a run: a throwing sink is swallowed.
+  const emit = (line: string): void => {
+    try {
+      opts.logger?.(line);
+    } catch {
+      // ignore logger failures (progress is best-effort, never load-bearing)
+    }
+  };
 
   // Semantics 1: gate failure never touches state. The returned state is an
   // in-memory snapshot for the caller; it is deliberately not saved.
@@ -309,6 +344,14 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
       cacheMisses: 0,
     };
   }
+
+  const totalPairs = gate.claims.length * roles.length;
+  let pairIndex = 0;
+  emit(
+    `evaluador: ${gate.claims.length} claim(s) × ${roles.length} role(s) = ` +
+      `${totalPairs} claim×role pair(s); roles: ${roles.join(", ")}; ` +
+      `model: ${opts.model ?? "opencode default"}; timeout ${formatDuration(timeoutMs)}/call`,
+  );
 
   const previous = loadState(stateDir);
   const budget = new Budget(opts.budget);
@@ -411,6 +454,8 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
       let claimInterrupted = false;
 
       for (const role of roles) {
+        pairIndex += 1;
+        const tag = `[${pairIndex}/${totalPairs}] ${claim.id} · ${role}`;
         const priorForRole = prior.filter((verdict) => verdict.role === role);
         const retryRole =
           retryClaim &&
@@ -423,6 +468,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
 
         if (canAdopt && priorForRole.length > 0) {
           cacheHits += 1;
+          emit(`${tag}: reused from state`);
           verdicts.push(...priorForRole);
           continue;
         }
@@ -430,6 +476,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
           const cached = cache.get(hash, role);
           if (cached !== undefined) {
             cacheHits += 1;
+            emit(`${tag}: cache hit`);
             verdicts.push(cached);
             continue;
           }
@@ -442,6 +489,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         // stays unbuilt and the claim declares the gap.
         if (budget.exhausted) {
           budgetGap = true;
+          emit(`${tag}: budget exhausted -> presupuesto-agotado`);
           continue;
         }
 
@@ -453,15 +501,33 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
           blockedFetch: fetchRules.blocked,
           model: opts.model,
         };
-        const result = await invokeDriver(
-          opts.driver,
-          call,
-          timeoutMs,
-          runController.signal,
-        );
+        const startedAt = Date.now();
+        emit(`${tag}: reviewing (timeout ${formatDuration(timeoutMs)})`);
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        if (heartbeatMs > 0) {
+          heartbeat = setInterval(() => {
+            emit(
+              `${tag}: still running ${formatDuration(Date.now() - startedAt)} ` +
+                `(timeout ${formatDuration(timeoutMs)})`,
+            );
+          }, heartbeatMs);
+        }
+        let result: AgentResult | "aborted";
+        try {
+          result = await invokeDriver(
+            opts.driver,
+            call,
+            timeoutMs,
+            runController.signal,
+          );
+        } finally {
+          if (heartbeat !== undefined) clearInterval(heartbeat);
+        }
+        const elapsed = formatDuration(Date.now() - startedAt);
         if (result === "aborted") {
           // The spawn already happened, so charge it honestly; the pair and
           // every later one stay unbuilt under the declared `interrumpido` gap.
+          emit(`${tag}: interrupted after ${elapsed}; state will resume`);
           budget.take(1);
           petitions += 1;
           claimInterrupted = true;
@@ -496,6 +562,15 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         // max and `petitions` keeps the one-call overshoot declared.
         budget.take(result.calls);
         petitions += result.calls;
+
+        const timedOut = result.verdicts.some((verdict) =>
+          verdict.hallazgo.startsWith("driver timeout"),
+        );
+        const outcome = assigned[0];
+        const label = timedOut ? "TIMEOUT" : (outcome?.resultado ?? "no verdict");
+        const severity = outcome?.severidad ?? "aviso";
+        const retried = result.calls > 1 ? ` [${result.calls} spawns]` : "";
+        emit(`${tag}: ${label} (${severity}) ${elapsed}${retried}`);
       }
 
       const next: RecordedClaim = { claim, hash, verdicts };
@@ -533,6 +608,11 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     const paused = snapshot();
     saveState(stateDir, paused);
     if (cacheDirty) cache.save();
+    emit(
+      `evaluador: interrupted after ${formatDuration(Date.now() - runStartedAt)}; ` +
+        `state saved, re-run to resume ` +
+        `(${petitions - startPetitions}/${opts.budget} call(s) spent this run)`,
+    );
     return {
       code: 1,
       state: paused,
@@ -584,6 +664,9 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   // (opt-in) open one branch per claim with a blocking verdict. Git failures
   // are warnings inside createIssueBranches and cannot change `code`.
   const allVerdicts = claims.flatMap((recorded) => recorded.verdicts);
+  const blockers = allVerdicts.filter(
+    (verdict) => verdict.severidad === "bloqueante",
+  ).length;
   const issues = writeIssues(stateDir, allVerdicts, state);
   if (opts.gitBranches === true) {
     createIssueBranches(opts.cwd, allVerdicts);
@@ -603,6 +686,11 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     cacheMisses,
   };
   writeOutputs(outDir, state, issues, runStats);
+  emit(
+    `evaluador: done: exit ${code}, ${blockers} blocker(s), ` +
+      `${spentThisRun}/${opts.budget} call(s) this run, artifacts in ${outDir} ` +
+      `(${formatDuration(Date.now() - runStartedAt)})`,
+  );
 
   return {
     code,

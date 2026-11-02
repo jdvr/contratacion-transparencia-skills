@@ -177,42 +177,63 @@ export function buildRunArgs(
   return ["run", ...(model ? ["--model", model] : []), prompt];
 }
 
-// Primary implementation: real `opencode run <prompt>` subprocess via
-// node:child_process. Spawn errors reject; the driver catches them above.
-// Exported so the focused test can exercise the real kill-on-abort path.
-// On abort (orchestrator per-call timeout) the child is killed and detached
-// from the event loop, so a hung backend cannot outlive the CLI; the piped
-// stdout closes with the child and this promise resolves on the close event.
-export const defaultRunProcess: SpawnFn = (cmd, args, signal) =>
-  new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
-    let stdout = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
-    });
+// Grace period between SIGTERM and SIGKILL on abort. A backend that traps
+// SIGTERM still dies; the escalation timer is cleared on close, so a normal
+// SIGTERM death never holds the process open.
+export const KILL_GRACE_MS = 5_000;
 
-    const onAbort = (): void => {
-      child.kill();
-      // Detach so even a backend that ignores SIGTERM cannot keep Node alive
-      // after the orchestrator has already recorded the timeout verdict.
-      child.unref();
-      const pipe = child.stdout as unknown as { unref?: () => void } | null;
-      pipe?.unref?.();
-    };
-    if (signal !== undefined) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    }
+// Real `opencode run <prompt>` subprocess via node:child_process, with an
+// injectable kill grace for tests. Spawn errors reject; the driver catches them
+// above. On abort (orchestrator per-call timeout or SIGINT) the child gets
+// SIGTERM and, if it is still alive after `graceMs`, SIGKILL. The child is also
+// detached from the event loop so even a backend that ignores both signals
+// cannot keep the CLI alive: the orchestrator has already recorded the timeout.
+// The piped stdout closes with the child and this promise resolves on close.
+export function makeRunProcess(graceMs: number = KILL_GRACE_MS): SpawnFn {
+  return (cmd, args, signal) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "ignore"] });
+      let stdout = "";
+      child.stdout?.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString("utf8");
+      });
 
-    child.on("error", (error) => {
-      signal?.removeEventListener("abort", onAbort);
-      reject(error);
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = (): void => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGTERM");
+          killTimer = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              child.kill("SIGKILL");
+            }
+          }, graceMs);
+          // Deliberately NOT unref'd: if the backend traps SIGTERM, the timer
+          // must keep the CLI alive until SIGKILL lands. `close` clears it.
+        }
+        child.unref();
+        const pipe = child.stdout as unknown as { unref?: () => void } | null;
+        pipe?.unref?.();
+      };
+      if (signal !== undefined) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      child.on("error", (error) => {
+        if (killTimer !== undefined) clearTimeout(killTimer);
+        signal?.removeEventListener("abort", onAbort);
+        reject(error);
+      });
+      child.on("close", (code) => {
+        if (killTimer !== undefined) clearTimeout(killTimer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve({ stdout, code: code ?? 1 });
+      });
     });
-    child.on("close", (code) => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve({ stdout, code: code ?? 1 });
-    });
-  });
+}
+
+// Primary implementation used by the CLI (default 5 s kill grace).
+export const defaultRunProcess: SpawnFn = makeRunProcess();
 
 // Attempts: 1 normal, at most 1 retry when the output can't be parsed/validated
 // (behavior 3). Spawn failures (rejected runProcess or non-zero exit) do not
@@ -224,6 +245,12 @@ export function opencodeDriver(
 ): Driver {
   return async (call: AgentCall): Promise<AgentResult> => {
     for (let attempt = 0; attempt < 2; attempt++) {
+      // Once the orchestrator has aborted this call (timeout/SIGINT), spawning
+      // the retry would be a second orphan no one is waiting for. `calls`
+      // still reports the attempts that really happened.
+      if (attempt > 0 && call.signal?.aborted) {
+        return { verdicts: [failureVerdict(call)], calls: attempt };
+      }
       // `calls` counts every real runProcess invocation, so it is one per
       // attempt (1 normal, 2 with the single retry) — exact for the Budget.
       let stdout: string;

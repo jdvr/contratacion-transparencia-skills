@@ -82,6 +82,25 @@ describe("parseEvalArgs", () => {
     });
   });
 
+  it("parses --timeout seconds into timeoutMs", () => {
+    const parsed = parseEvalArgs(["reporte.md", "--timeout", "90"]);
+    expect(parsed).toMatchObject({ ok: true, args: { timeoutMs: 90_000 } });
+  });
+
+  it("rejects a missing, zero, negative or non-numeric --timeout", () => {
+    for (const argv of [
+      ["reporte.md", "--timeout"],
+      ["reporte.md", "--timeout", "0"],
+      ["reporte.md", "--timeout", "-5"],
+      ["reporte.md", "--timeout", "9s"],
+    ]) {
+      expect(parseEvalArgs(argv)).toEqual({
+        ok: false,
+        message: "--timeout requires a positive integer of seconds",
+      });
+    }
+  });
+
   it("rejects an unknown flag naming it (typo --no-chache)", () => {
     expect(parseEvalArgs(["reporte.md", "--no-chache"])).toEqual({
       ok: false,

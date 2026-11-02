@@ -38,7 +38,7 @@ node dist/cli.js init
 # Gate + adversarial review. Writes .evaluador/state.json, .evaluador/issues/,
 # and reporte-final.md/.html + evidencia.json + resumen.json next to the report
 # (or under -o <dir>):
-node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--model provider/model] [--git-branches]
+node dist/cli.js eval reporte.md [-o salida] [--no-cache] [--budget 20] [--roles contadores,segunda-fuente] [--model provider/model] [--timeout 300] [--git-branches]
 ```
 
 Exit codes:
@@ -58,6 +58,16 @@ HTTP requests to public portals; `resumen.json` reports the cumulative count
 reviewer roles in that run; without the flag, opencode's default model is used.
 The reviewer model is part of the cache key: changing `--model` re-reviews
 claims (or pass `--no-cache` to force a full re-run).
+
+Progress goes to **stderr** (stdout stays reserved for the gate-failure JSON):
+one line per claim×role pair, cache/state reuse, and a heartbeat every 30 s
+while a call is in flight. The default per-call timeout is 300 s; override it
+with `--timeout <seconds>`. A call that hits the timeout is recorded honestly as
+`sin-re-verificar`/`bloqueante` (exit 1), never as a silent hang. Slow free
+models can legitimately spend minutes on one claim — watch the heartbeat, and
+prefer a fast model for long reports (e.g. `--model opencode-go/deepseek-v4.1-flash`
+worked reliably for this repo). A backend that traps `SIGTERM` is escalated to
+`SIGKILL` after a 5 s grace, so an aborted run leaves no orphan subprocess.
 
 ## Build and host
 

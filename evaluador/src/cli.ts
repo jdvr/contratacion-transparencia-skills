@@ -27,6 +27,9 @@ export interface MainDeps {
   cwd?: string;
   driver?: Driver;
   timeoutMs?: number;
+  // Progress sink. The installed binary passes console.error so stderr shows
+  // per-call progress; tests and embedded callers stay silent by default.
+  logger?: (line: string) => void;
 }
 
 // init: prints the report contract (INIT_CONTRACT) and scaffolds .evaluador/
@@ -48,6 +51,8 @@ export interface EvalArgs {
   roles?: RoleId[];
   // Reviewer model passed verbatim to the backend (`provider/model`).
   model?: string;
+  // Per-call driver timeout from `--timeout <seconds>`.
+  timeoutMs?: number;
 }
 
 export type EvalArgsResult =
@@ -77,6 +82,7 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
   let outDir: string | undefined;
   let roles: RoleId[] | undefined;
   let model: string | undefined;
+  let timeoutMs: number | undefined;
   const positional: string[] = [];
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -141,6 +147,18 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
         i += 1;
         break;
       }
+      case "--timeout": {
+        const value = argv[i + 1];
+        if (value === undefined || !/^[1-9]\d*$/.test(value)) {
+          return {
+            ok: false,
+            message: "--timeout requires a positive integer of seconds",
+          };
+        }
+        timeoutMs = Number(value) * 1000;
+        i += 1;
+        break;
+      }
       default:
         if (arg.startsWith("-")) {
           return { ok: false, message: `unknown flag: ${arg}` };
@@ -161,7 +179,7 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
   }
   return {
     ok: true,
-    args: { file, outDir, noCache, gitBranches, budget, roles, model },
+    args: { file, outDir, noCache, gitBranches, budget, roles, model, timeoutMs },
   };
 }
 
@@ -182,7 +200,7 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
     console.error(`evaluador: ${parsed.message}`);
     return EXIT_UNKNOWN_COMMAND;
   }
-  const { file, outDir, noCache, gitBranches, budget, roles, model } =
+  const { file, outDir, noCache, gitBranches, budget, roles, model, timeoutMs } =
     parsed.args;
 
   try {
@@ -202,7 +220,10 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
       budget: budget ?? loadBudget(deps.cwd ?? process.cwd()),
       driver: deps.driver ?? opencodeDriver(),
       cwd: deps.cwd ?? process.cwd(),
-      timeoutMs: deps.timeoutMs,
+      // The flag wins over the test seam, so an embedded caller can still cap
+      // the default while the CLI exposes per-run control.
+      timeoutMs: timeoutMs ?? deps.timeoutMs,
+      logger: deps.logger,
       gitBranches,
     });
     if (result.code === EXIT_GATE_FAILED) {
@@ -251,7 +272,7 @@ function printUsage(): void {
     "",
     "Commands:",
     "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--model provider/model] [--git-branches]  Run the structural gate and adversarial review",
+    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--model provider/model] [--timeout seconds] [--git-branches]  Run the structural gate and adversarial review",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));
@@ -309,7 +330,11 @@ const entryRealPath = process.argv[1] ? tryRealPath(process.argv[1]) : null;
 const moduleRealPath = tryRealPath(fileURLToPath(import.meta.url));
 if (entryRealPath !== null && entryRealPath === moduleRealPath) {
   try {
-    process.exitCode = await main(process.argv.slice(2));
+    process.exitCode = await main(process.argv.slice(2), {
+      // Progress is best-effort and goes to stderr, so stdout stays reserved
+      // for the gate-failure JSON and pipelines can consume it unchanged.
+      logger: (line) => console.error(line),
+    });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`evaluador: ${message}`);

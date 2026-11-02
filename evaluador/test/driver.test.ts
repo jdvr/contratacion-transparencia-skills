@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildRunArgs,
   defaultRunProcess,
+  makeRunProcess,
   opencodeDriver,
 } from "../src/driver/opencode.js";
 import type { AgentCall, SpawnFn } from "../src/driver/types.js";
@@ -332,6 +333,63 @@ describe("opencode driver", () => {
       }
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("(l) escalates to SIGKILL when the child ignores SIGTERM", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "evaluador-driver-sigkill-"));
+    const pidFile = join(dir, "pid");
+    const controller = new AbortController();
+    let pid: number | undefined;
+
+    try {
+      // A 50 ms grace makes the escalation observable without slowing the suite.
+      const pending = makeRunProcess(50)(
+        process.execPath,
+        [
+          "-e",
+          // Ignore SIGTERM, write the pid, then hang: only SIGKILL ends it.
+          'process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);',
+          pidFile,
+        ],
+        controller.signal,
+      );
+      pid = await waitFor(() => readPid(pidFile));
+
+      controller.abort();
+      const result = await pending;
+
+      expect(result.code).not.toBe(0);
+      await waitFor(() => (isDead(pid as number) ? true : undefined));
+      expect(isDead(pid)).toBe(true);
+    } finally {
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already dead
+        }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(m) does not spawn a retry once the call was aborted", async () => {
+    const controller = new AbortController();
+    let spawns = 0;
+    const run: SpawnFn = async () => {
+      spawns += 1;
+      controller.abort(); // the timeout landed while this attempt was running
+      return { stdout: "no es json", code: 0 };
+    };
+
+    const result = await opencodeDriver("opencode", run)({
+      ...baseCall,
+      signal: controller.signal,
+    });
+
+    expect(spawns).toBe(1);
+    expect(result.calls).toBe(1);
+    expect(result.verdicts[0]?.resultado).toBe("sin-re-verificar");
   });
 
   it("(j) an already-aborted signal kills the child immediately", async () => {
