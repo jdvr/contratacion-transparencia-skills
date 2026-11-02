@@ -1,7 +1,9 @@
 // VerdictCache (Task 7): a content-addressed store of adversarial-review
 // verdicts. The key is the contentHash hex (state.ts) of
-// `{"claim": claim, "rubricVersion": RUBRIC_VERSION}`, so any claim edit or
-// rubric bump lands on a fresh key and stale verdicts can never be served.
+// `{"claim": claim, "rubricVersion": RUBRIC_VERSION, "modelLabel": label}`, so
+// any claim edit, rubric bump or `--model` switch lands on a fresh key and
+// stale verdicts can never be served. The model is part of the verdict identity
+// (since the `--model` change), not just a recorded label.
 // On disk (`.evaluador/cache.json`, path supplied by orchestration) the shape
 // is a JSON.parseable twin of the in-memory store:
 //   Record<hash, Record<RoleId, { verdict: Verdict; model: string; updatedAt: string }>>

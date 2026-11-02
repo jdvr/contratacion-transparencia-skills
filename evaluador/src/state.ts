@@ -2,9 +2,10 @@
 // any JSON-ish value with recursively key-sorted objects, so two values that
 // are equal as data serialize identically; `contentHash` is the sha256 hex of
 // that rendering. The orchestrator (Task 8) hashes the payload
-// `{"claim": claim, "rubricVersion": RUBRIC_VERSION}`, which pins Review
-// Focus #2: a rubric bump (rubricV1 → rubricV2) changes every key and
-// invalidates the cache wholesale. Zero runtime dependencies.
+// `{"claim": claim, "rubricVersion": RUBRIC_VERSION, "modelLabel": label}`,
+// which pins Review Focus #2: a rubric bump (rubricV1 → rubricV2) changes every
+// key and invalidates the cache wholesale. The reviewer model is part of the
+// verdict identity too (since the `--model` change). Zero runtime dependencies.
 // See docs/superpowers/specs/2026-10-31-evaluador-design.md.
 
 import { createHash } from "node:crypto";
