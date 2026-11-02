@@ -331,6 +331,50 @@ describe("runEval", () => {
     expect(recordedClaim(second.state, "claim-c2").recheck).toBeUndefined();
   });
 
+  it("(e2) a budget pause never downgrades a pending sin-re-verificar marker", async () => {
+    const session = newSession();
+    // Run 1: c2's roles return the canonical failure verdict, so the claim is
+    // marked sin-re-verificar and those verdicts also land in the cache.
+    const failing = countingDriver((call) => ({
+      verdicts: [
+        call.material.includes("claim-c2")
+          ? okVerdict(call, {
+              resultado: "sin-re-verificar",
+              severidad: "bloqueante",
+              hallazgo: "no re-verificado en la primera pasada",
+            })
+          : okVerdict(call),
+      ],
+      calls: 1,
+    }));
+    const first = await runEval(evalOpts(session, failing.driver));
+    expect(first.code).toBe(1);
+    expect(recordedClaim(first.state, "claim-c2").recheck).toBe("sin-re-verificar");
+
+    // Run 2: budget 0, so c2's retry is paused before its first fresh verdict.
+    // The marker must stay sin-re-verificar (a pause cannot weaken it).
+    const paused = countingDriver((call) => ({ verdicts: [okVerdict(call)], calls: 1 }));
+    const second = await runEval(evalOpts(session, paused.driver, { budget: 0 }));
+    expect(second.code).toBe(1);
+    expect(paused.calls).toHaveLength(0); // c1/c3 adopted free of petitions
+    const stillFailing = recordedClaim(second.state, "claim-c2");
+    expect(stillFailing.recheck).toBe("sin-re-verificar");
+    expect(stillFailing.verdicts).toHaveLength(0); // the retry produced nothing
+
+    // Run 3: normal budget. The pending sin-re-verificar must still bypass the
+    // cache (which holds run 1's failure verdicts) and re-drive all 4 roles.
+    const { driver, calls } = okDriver();
+    const third = await runEval(evalOpts(session, driver));
+
+    expect(third.code).toBe(0);
+    expect(calls).toHaveLength(4);
+    for (const call of calls) expect(call.material).toContain("claim-c2");
+    const resolved = recordedClaim(third.state, "claim-c2");
+    expect(resolved.recheck).toBeUndefined();
+    expect(resolved.verdicts).toHaveLength(4);
+    expect(resolved.verdicts.every((verdict) => verdict.resultado === "ok")).toBe(true);
+  });
+
   it("(f) budget 5 of 12: five calls, gap pairs marked presupuesto-agotado, code 1", async () => {
     const session = newSession();
     const { driver, calls } = okDriver();

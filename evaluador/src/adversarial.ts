@@ -312,7 +312,15 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     }
 
     const next: RecordedClaim = { claim, hash, verdicts };
-    if (verdicts.some((verdict) => verdict.resultado === "sin-re-verificar")) {
+    // A budget pause must never DROP a pending `sin-re-verificar`: if that
+    // claim's retry did not complete, it keeps its stronger marker (and its
+    // cache bypass) and only a completed retry may reclassify it. A fresh
+    // budget-only pause is the weaker gap.
+    const pendingSinReverificar = recheck === "sin-re-verificar";
+    if (
+      verdicts.some((verdict) => verdict.resultado === "sin-re-verificar") ||
+      (budgetGap && pendingSinReverificar)
+    ) {
       next.recheck = "sin-re-verificar";
     } else if (budgetGap) {
       next.recheck = "presupuesto-agotado";
