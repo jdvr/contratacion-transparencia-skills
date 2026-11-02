@@ -45,4 +45,10 @@ file with a Node shebang and no runtime dependencies. Build once with
 with Node 22+. The real driver shells out to the `opencode` binary; tests and
 embedded runs inject a fake driver and never touch the network.
 
+The fetch allowlist is **prompt-enforced in v1**: the driver tells the model
+which URLs it may fetch (after `www.` normalization and the documented
+`*.gobiernodecanarias.org` wildcard), but there is no OS-level network
+restriction — the model decides, and an unlisted source must be declared
+`sin-re-verificar` instead of fetched.
+
 See `../docs/superpowers/specs/2026-10-31-evaluador-design.md` for the design.

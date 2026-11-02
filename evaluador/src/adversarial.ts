@@ -319,6 +319,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     const verdicts: Verdict[] = prior.filter(
       (verdict) => !requested.has(verdict.role as RoleId),
     );
+    const fetchRules = resolveFetch(claim);
     let budgetGap = false;
 
     for (const role of roles) {
@@ -360,7 +361,8 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
         role,
         rubric: rubricFor(role),
         material: materialFor(claim),
-        allowFetch: resolveFetch(claim).allowed,
+        allowFetch: fetchRules.allowed,
+        blockedFetch: fetchRules.blocked,
       };
       const result = await invokeDriver(opts.driver, call, timeoutMs);
       let assigned = result.verdicts.map((verdict) => ({

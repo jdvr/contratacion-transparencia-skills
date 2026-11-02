@@ -15,15 +15,18 @@ export type Verdict = {
 };
 
 // One agent request. `allowFetch` is the resolved URL allowlist (Task 6); an
-// empty list means the agent must not fetch anything at all. `signal` is the
-// optional cancellation seam (Task 8): when aborted by the orchestrator's
-// per-call timeout, a real driver kills its spawned child. The Driver
-// signature itself does not change.
+// empty list means the agent must not fetch anything at all. `blockedFetch`
+// carries the URLs the claim cites but the allowlist rejects, so the driver can
+// distinguish "there was nothing to fetch" from "the sources are outside the
+// allowlist and a human must decide". `signal` is the optional cancellation seam
+// (Task 8): when aborted by the orchestrator's per-call timeout, a real driver
+// kills its spawned child. The Driver signature itself does not change.
 export interface AgentCall {
   role: string;
   rubric: string;
   material: string;
   allowFetch: string[];
+  blockedFetch?: string[];
   signal?: AbortSignal;
 }
 

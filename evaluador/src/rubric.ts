@@ -13,9 +13,12 @@ import type { Claim } from "./contract.js";
 export const RUBRIC_VERSION = "rubricV1";
 
 // Exact allowlist (human decision, spec fase 3): a role may only fetch sources
-// already cited in the report and domains verified in the skills. Exact host
-// match against these entries — no subdomain matching, no "www." normalization
-// (www.datos.canarias.es is NOT datos.canarias.es and is blocked).
+// already cited in the report and domains verified in the skills. Matching is
+// exact on the host AFTER normalizing one leading "www." (www.boe.es is
+// boe.es). One documented wildcard: any subdomain of gobiernodecanarias.org
+// (e.g. istac.gobiernodecanarias.org) is accepted, because the skills use those
+// hosts for the same public body. Everything else stays fail-closed: no other
+// subdomain and no look-alike suffix passes.
 export const ALLOWED_HOSTS = [
   "datos.canarias.es",
   "gobiernodecanarias.org",
@@ -23,6 +26,9 @@ export const ALLOWED_HOSTS = [
   "boe.es",
   "ted.europa.eu",
 ] as const;
+
+// The single host whose subdomains are allowed (ISTAC and other GobCan hosts).
+const WILDCARD_HOST = "gobiernodecanarias.org";
 
 // Role ids are ASCII (they travel through JSON, CLI args and cache keys); the
 // human-facing presentation of the fourth role carries the accent.
@@ -209,11 +215,13 @@ ${VERDICT_CONTRACT}`;
 
 // Resolves which of the claim's URLs a reviewer may fetch. The claim's "url"
 // field may carry several URLs separated by whitespace; each token is routed
-// independently. Exact host match against ALLOWED_HOSTS decides: the scheme
-// and port are irrelevant, subdomains and "www." prefixes never pass, a token
-// without a scheme is checked as an https host anyway. Unparseable tokens land
-// in "blocked" (never silently dropped); an empty/whitespace-only "url" yields
-// nothing to fetch (an empty "allowed" means the agent must not fetch at all).
+// independently. Matching is exact on the lowercase host after dropping one
+// leading "www." (so https://www.boe.es/... maps to boe.es), plus the single
+// documented wildcard for *.gobiernodecanarias.org. The scheme and port are
+// irrelevant; a token without a scheme is checked as an https host anyway.
+// Unparseable tokens land in "blocked" (never silently dropped); an
+// empty/whitespace-only "url" yields nothing to fetch (an empty "allowed" means
+// the agent must not fetch at all).
 export function resolveFetch(
   claim: Claim,
 ): { allowed: string[]; blocked: string[] } {
@@ -222,13 +230,22 @@ export function resolveFetch(
   for (const token of claim.url.split(/\s+/)) {
     if (token === "") continue;
     const host = urlHost(token);
-    if (host !== null && (ALLOWED_HOSTS as readonly string[]).includes(host)) {
+    if (host !== null && isAllowedHost(host)) {
       allowed.push(token);
     } else {
       blocked.push(token);
     }
   }
   return { allowed, blocked };
+}
+
+// www-normalization plus allowlist membership. The wildcard is deliberately
+// limited to one entry and anchored with a leading dot, so
+// "notgobiernodecanarias.org" and "gobiernodecanarias.org.evil.com" stay blocked.
+function isAllowedHost(rawHost: string): boolean {
+  const host = rawHost.startsWith("www.") ? rawHost.slice("www.".length) : rawHost;
+  if (host === WILDCARD_HOST || host.endsWith(`.${WILDCARD_HOST}`)) return true;
+  return (ALLOWED_HOSTS as readonly string[]).includes(host);
 }
 
 // Extracts the lowercase hostname of a URL token; scheme-less tokens are

@@ -14,6 +14,12 @@ import type {
 
 // Injected when the claim cites nothing fetchable (allowlist lives in Task 6).
 const NO_FETCH_PHRASE = "No hagas fetch: marca resultado sin-re-verificar";
+// Injected when the claim DOES cite sources, but all of them are outside the
+// allowlist: the reviewer is told why it cannot fetch and what to declare,
+// instead of being told (falsely) that there is nothing to fetch.
+const BLOCKED_FETCH_SUFFIX =
+  "Si necesitas consultar una fuente y no puedes fetch, marca resultado " +
+  "sin-re-verificar y cita el dominio en hallazgo";
 // Appended on the single retry for unparseable/invalid output.
 const RETRY_SUFFIX = "SOLO el bloque fenced ```json, sin texto fuera de él";
 const VERDICT_SCHEMA =
@@ -49,7 +55,12 @@ function buildPrompt(call: AgentCall, retry: boolean): string {
     "No escribas nada fuera de ese único bloque.",
   ];
   if (call.allowFetch.length === 0) {
-    parts.push(NO_FETCH_PHRASE);
+    const blocked = call.blockedFetch ?? [];
+    if (blocked.length > 0) {
+      parts.push(`No hagas fetch a: ${blocked.join(", ")}. ${BLOCKED_FETCH_SUFFIX}`);
+    } else {
+      parts.push(NO_FETCH_PHRASE);
+    }
   } else {
     parts.push(`Puedes hacer fetch únicamente a: ${call.allowFetch.join(", ")}`);
   }

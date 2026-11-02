@@ -217,6 +217,20 @@ describe("runEval", () => {
     }
   });
 
+  it("threads the blocked sources of a claim into the driver call", async () => {
+    const blockedUrl = "https://evil.example/dataset";
+    const session = newSession([
+      { ...baseClaim("claim-blocked"), url: blockedUrl },
+    ]);
+    const { driver, calls } = okDriver();
+
+    await runEval({ ...evalOpts(session, driver), roles: ["contadores"] });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.allowFetch).toEqual([]);
+    expect(calls[0]?.blockedFetch).toEqual([blockedUrl]);
+  });
+
   it("(b) second run over an unchanged report: zero driver calls", async () => {
     const session = newSession();
     const first = await runEval(evalOpts(session, okDriver().driver));

@@ -224,6 +224,24 @@ describe("opencode driver", () => {
     expect(prompts2[0]).not.toContain(NO_FETCH_PHRASE);
   });
 
+  it("(e2) an empty allowlist with blocked sources names them instead of denying a fetch", async () => {
+    const blocked = ["https://evil.example/private", "https://unknown.example/x"];
+    const { run, prompts } = scriptedRun([{ stdout: verdictJson(), code: 0 }]);
+    await opencodeDriver("opencode", run)({
+      ...baseCall,
+      allowFetch: [],
+      blockedFetch: blocked,
+    });
+
+    const prompt = prompts[0] ?? "";
+    expect(prompt).toContain(`No hagas fetch a: ${blocked.join(", ")}`);
+    expect(prompt).toContain(
+      "marca resultado sin-re-verificar y cita el dominio en hallazgo",
+    );
+    // Not the "there is nothing to fetch" wording: the claim DOES cite sources.
+    expect(prompt).not.toContain(NO_FETCH_PHRASE);
+  });
+
   it("(f) runProcess rejecting (spawn failure) never throws: error verdict, calls: 1", async () => {
     const { run, calls } = rejectingRun(new Error("ENOENT: spawn opencode"));
     const result = await opencodeDriver("opencode", run)(baseCall);

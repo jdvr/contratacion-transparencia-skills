@@ -1,7 +1,8 @@
 // Tests for rubricV1: the versioned role rubrics and the fetch allowlist.
 // Scenarios follow the brief (a-d); the pinned strings ("criterio del total",
 // "GROUP BY") are the domain-checklist tokens the spec's controls are named by.
-// resolveFetch is host-EXACT: no subdomain matching, no "www." normalization.
+// resolveFetch is host-exact after one leading "www." normalization, with the
+// single documented *.gobiernodecanarias.org wildcard (ISTAC).
 import { describe, expect, it } from "vitest";
 import {
   ALLOWED_HOSTS,
@@ -174,11 +175,32 @@ describe("resolveFetch(claim)", () => {
     expect(blocked).toEqual(["https://example.org/c"]);
   });
 
-  it("host matching is exact: no subdomains, no www normalization", () => {
-    const { allowed } = resolveFetch(
-      makeClaim("https://www.datos.canarias.es/a https://datos.canarias.es.evil.com/b"),
-    );
-    expect(allowed).toEqual([]);
+  it("normalizes one leading www. before matching (canonical skill URLs)", () => {
+    const urls =
+      "https://www.boe.es/buscar/doc.php?id=BOE-A-2026-XXXXX " +
+      "https://www.datos.canarias.es/catalogos/x " +
+      "https://datos.canarias.es.evil.com/b";
+    const { allowed, blocked } = resolveFetch(makeClaim(urls));
+    expect(allowed).toEqual([
+      "https://www.boe.es/buscar/doc.php?id=BOE-A-2026-XXXXX",
+      "https://www.datos.canarias.es/catalogos/x",
+    ]);
+    expect(blocked).toEqual(["https://datos.canarias.es.evil.com/b"]);
+  });
+
+  it("allows subdomains of gobiernodecanarias.org (ISTAC) and nothing else", () => {
+    const urls =
+      "https://istac.gobiernodecanarias.org/dataset/x " +
+      "https://notgobiernodecanarias.org/x " +
+      "https://gobiernodecanarias.org.evil.com/x " +
+      "https://evil.com/x";
+    const { allowed, blocked } = resolveFetch(makeClaim(urls));
+    expect(allowed).toEqual(["https://istac.gobiernodecanarias.org/dataset/x"]);
+    expect(blocked).toEqual([
+      "https://notgobiernodecanarias.org/x",
+      "https://gobiernodecanarias.org.evil.com/x",
+      "https://evil.com/x",
+    ]);
   });
 
   it("scheme-agnostic on the allowed host: any scheme passes, host decides", () => {
