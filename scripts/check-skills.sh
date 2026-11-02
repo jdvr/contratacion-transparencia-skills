@@ -145,11 +145,22 @@ check_skill() {
   fi
 }
 
-# --- Skills: se recorren los directorios, no solo los SKILL.md existentes,
-#     para que un directorio sin SKILL.md no pase invisible ---
+# --- Skills: se recorren los directorios de skills/, no solo los SKILL.md
+#     existentes, para que un directorio sin SKILL.md no pase invisible.
+#     `evaluador/` es el harness binario del repo (no tiene SKILL.md): queda
+#     fuera de la validación de contenido por construcción y por `not_a_skill`,
+#     para que un futuro barrido más amplio no lo confunda con una skill. ---
+not_a_skill() {
+  case "$1" in
+    evaluador) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 for d in "$ROOT"/skills/*/; do
   [ -d "$d" ] || continue
   name="$(basename "$d")"
+  not_a_skill "$name" && continue
   if [ ! -f "$d/SKILL.md" ]; then
     err "skills/$name/SKILL.md" 1 "directorio sin SKILL.md"
     continue
@@ -163,6 +174,7 @@ done
 for d in "$ROOT"/skills/*/; do
   [ -d "$d" ] || continue
   name="$(basename "$d")"
+  not_a_skill "$name" && continue
   grep -qF -- "\`$name\`" "$ROOT/skills/README.md" 2>/dev/null || \
     err "skills/README.md" 1 "skill huérfana: \`$name\` no está en la tabla índice"
   if [ "$name" != "mantenimiento" ]; then

@@ -14,6 +14,8 @@ Skills para agentes que exploran, recogen y analizan datos públicos de contrata
 | `ckan` | Patrones genéricos de CKAN (reutilizable en cualquier portal que lo use) | 2026-10-28 (instancia GobCan) |
 | `mantenimiento` | Rutina del repo: añadir/actualizar/verificar/sincronizar skills (la usa el agente `mantenedor`) | 2026-10-28 (repo construido con ella) |
 
+> **Binario de cierre:** `evaluador/` no es una skill (no tiene `SKILL.md`): es el harness que cierra una investigación con cifras (gate, revisión adversarial, issues y reporte final). Ver `evaluador/README.md`.
+
 ## Capas y convención de nombres
 
 1. **Genérica de plataforma**: `placsp`, `doue-ted`, `ckan` — valen para todo el estado español / UE / cualquier portal CKAN. Nacieron de la experiencia canaria pero no suponen Canarias.
