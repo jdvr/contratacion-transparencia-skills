@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { runGate } from "../src/gate.js";
 import { main } from "../src/cli.js";
+import type { MainDeps } from "../src/cli.js";
+import type { Driver } from "../src/driver/types.js";
 
 const fixtureMd = readFileSync(
   new URL("./fixtures.reporte.md", import.meta.url),
@@ -263,12 +265,15 @@ describe("cli eval wiring", () => {
     return path;
   }
 
-  async function runCapturingEval(args: string[]): Promise<{ code: number; stdoutLines: string[] }> {
+  async function runCapturingEval(
+    args: string[],
+    deps: MainDeps = {},
+  ): Promise<{ code: number; stdoutLines: string[] }> {
     const stdoutLines: string[] = [];
     const originalLog = console.log;
     console.log = (message?: unknown) => stdoutLines.push(String(message));
     try {
-      const code = await main(args);
+      const code = await main(args, deps);
       return { code, stdoutLines };
     } finally {
       console.log = originalLog;
@@ -295,12 +300,27 @@ describe("cli eval wiring", () => {
     });
   });
 
-  it("gate pass => temporarily exit 0 (phases 2+ arrive with Task 8)", async () => {
+  it("gate pass => exit 0 from runEval (phases 2+ wired in Task 8)", async () => {
     const path = tmpReport("pasa.md", "REPORTE (DATOS GENERADOS)\n" + claimMd());
-    const { code, stdoutLines } = await runCapturingEval(["eval", path]);
+    const okDriver: Driver = async (call) => ({
+      verdicts: [
+        {
+          claimId: "",
+          role: call.role,
+          resultado: "ok",
+          severidad: "aviso",
+          hallazgo: "",
+          evidencia: [],
+        },
+      ],
+      calls: 1,
+    });
+    const { code, stdoutLines } = await runCapturingEval(["eval", path], {
+      driver: okDriver,
+      cwd: tempRoot,
+    });
     expect(code).toBe(0);
-    const out = jsonOut(stdoutLines);
-    expect(out).toEqual({ ok: true, gaps: [], claims: 1 });
+    expect(stdoutLines).toEqual([]); // 0/1 are exit-only until Task 11 artifacts
   });
 
   it("unreadable report file => exit 3 (usage/parse)", async () => {

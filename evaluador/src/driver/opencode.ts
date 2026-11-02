@@ -63,8 +63,11 @@ function lastFencedJson(stdout: string): string | undefined {
   return last;
 }
 
-const RESULTADOS = new Set(["ok", "problema", "sin-re-verificar"]);
-const SEVERIDADES = new Set(["aviso", "bloqueante"]);
+// Literal sets accepted by the manual Verdict validation. Exported so the
+// orchestrator's cross-suite test can pin them against every rubric (Task 6
+// carry: rubric/driver schema drift must not silently degrade every verdict).
+export const RESULTADOS = new Set(["ok", "problema", "sin-re-verificar"]);
+export const SEVERIDADES = new Set(["aviso", "bloqueante"]);
 
 // Manual field validation of Verdict (no ajv, no schema lib): every required
 // field present with the right primitive type / literal value. A `role` that
