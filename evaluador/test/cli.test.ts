@@ -101,6 +101,25 @@ describe("parseEvalArgs", () => {
     }
   });
 
+  it("parses --jobs as a positive integer", () => {
+    const parsed = parseEvalArgs(["reporte.md", "--jobs", "3"]);
+    expect(parsed).toMatchObject({ ok: true, args: { jobs: 3 } });
+  });
+
+  it("rejects a missing, zero, negative or non-numeric --jobs", () => {
+    for (const argv of [
+      ["reporte.md", "--jobs"],
+      ["reporte.md", "--jobs", "0"],
+      ["reporte.md", "--jobs", "-1"],
+      ["reporte.md", "--jobs", "tres"],
+    ]) {
+      expect(parseEvalArgs(argv)).toEqual({
+        ok: false,
+        message: "--jobs requires a positive integer",
+      });
+    }
+  });
+
   it("rejects an unknown flag naming it (typo --no-chache)", () => {
     expect(parseEvalArgs(["reporte.md", "--no-chache"])).toEqual({
       ok: false,

@@ -256,6 +256,9 @@ export interface RunEvalOptions {
   cwd: string;
   // Per-call driver timeout (tests inject a small value).
   timeoutMs?: number;
+  // Concurrent claim×role workers. The library default is 1 (sequential); the
+  // CLI passes 4 unless --jobs overrides it.
+  jobs?: number;
   // Progress sink (stderr in the CLI). Default: silent, so library callers and
   // the test suite stay pristine unless they opt in.
   logger?: (line: string) => void;
@@ -296,6 +299,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   const roles = opts.roles ?? DEFAULT_ROLES;
   const timeoutMs = opts.timeoutMs ?? DRIVER_TIMEOUT_MS;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
+  const jobs = opts.jobs ?? 1;
   const runStartedAt = Date.now();
   // A progress logger must never break a run: a throwing sink is swallowed.
   const emit = (line: string): void => {
@@ -345,12 +349,32 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     };
   }
 
+  // Embedded callers can pass an invalid pool size; the CLI parser already
+  // rejects it, so this is the same fail-closed usage path as empty roles.
+  if (!Number.isInteger(jobs) || jobs < 1) {
+    return {
+      code: 3,
+      state: freshState(
+        gate.claims,
+        reportHash,
+        roles,
+        new Date().toISOString(),
+        opts.model,
+      ),
+      budget: opts.budget,
+      spentThisRun: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+    };
+  }
+
   const totalPairs = gate.claims.length * roles.length;
   let pairIndex = 0;
   emit(
     `evaluador: ${gate.claims.length} claim(s) × ${roles.length} role(s) = ` +
       `${totalPairs} claim×role pair(s); roles: ${roles.join(", ")}; ` +
-      `model: ${opts.model ?? "opencode default"}; timeout ${formatDuration(timeoutMs)}/call`,
+      `model: ${opts.model ?? "opencode default"}; jobs: ${jobs}; ` +
+      `timeout ${formatDuration(timeoutMs)}/call`,
   );
 
   const previous = loadState(stateDir);

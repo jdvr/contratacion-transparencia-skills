@@ -27,6 +27,8 @@ export interface MainDeps {
   cwd?: string;
   driver?: Driver;
   timeoutMs?: number;
+  // Concurrent claim×role workers for the CLI default (flag wins).
+  jobs?: number;
   // Progress sink. The installed binary passes console.error so stderr shows
   // per-call progress; tests and embedded callers stay silent by default.
   logger?: (line: string) => void;
@@ -53,6 +55,8 @@ export interface EvalArgs {
   model?: string;
   // Per-call driver timeout from `--timeout <seconds>`.
   timeoutMs?: number;
+  // Concurrent review workers (`--jobs`); the CLI default is 4.
+  jobs?: number;
 }
 
 export type EvalArgsResult =
@@ -83,6 +87,7 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
   let roles: RoleId[] | undefined;
   let model: string | undefined;
   let timeoutMs: number | undefined;
+  let jobs: number | undefined;
   const positional: string[] = [];
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -159,6 +164,15 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
         i += 1;
         break;
       }
+      case "--jobs": {
+        const value = argv[i + 1];
+        if (value === undefined || !/^[1-9]\d*$/.test(value)) {
+          return { ok: false, message: "--jobs requires a positive integer" };
+        }
+        jobs = Number(value);
+        i += 1;
+        break;
+      }
       default:
         if (arg.startsWith("-")) {
           return { ok: false, message: `unknown flag: ${arg}` };
@@ -179,7 +193,7 @@ export function parseEvalArgs(argv: string[]): EvalArgsResult {
   }
   return {
     ok: true,
-    args: { file, outDir, noCache, gitBranches, budget, roles, model, timeoutMs },
+    args: { file, outDir, noCache, gitBranches, budget, roles, model, timeoutMs, jobs },
   };
 }
 
@@ -200,7 +214,7 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
     console.error(`evaluador: ${parsed.message}`);
     return EXIT_UNKNOWN_COMMAND;
   }
-  const { file, outDir, noCache, gitBranches, budget, roles, model, timeoutMs } =
+  const { file, outDir, noCache, gitBranches, budget, roles, model, timeoutMs, jobs } =
     parsed.args;
 
   try {
@@ -223,6 +237,7 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
       // The flag wins over the test seam, so an embedded caller can still cap
       // the default while the CLI exposes per-run control.
       timeoutMs: timeoutMs ?? deps.timeoutMs,
+      jobs: jobs ?? deps.jobs ?? 4,
       logger: deps.logger,
       gitBranches,
     });
@@ -272,7 +287,7 @@ function printUsage(): void {
     "",
     "Commands:",
     "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--model provider/model] [--timeout seconds] [--git-branches]  Run the structural gate and adversarial review",
+    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--model provider/model] [--timeout seconds] [--jobs N] [--git-branches]  Run the structural gate and adversarial review",
     "  --help Show this help",
   ];
   console.log(lines.join("\n"));
