@@ -12,8 +12,9 @@ import {
   loadState,
   runEval,
   saveState,
+  unreviewedPairs,
 } from "../src/adversarial.js";
-import type { EvaluatorState, RunEvalOptions } from "../src/adversarial.js";
+import type { EvaluatorState, RecordedClaim, RunEvalOptions } from "../src/adversarial.js";
 import { main } from "../src/cli.js";
 import { RESULTADOS, SEVERIDADES } from "../src/driver/opencode.js";
 import type { AgentCall, AgentResult, Driver, Verdict } from "../src/driver/types.js";
@@ -707,6 +708,78 @@ describe("runEval", () => {
         evidencia: [],
       },
     ]);
+  });
+
+  it("drops an invalid verdict literal from state and re-drives that pair", async () => {
+    const session = newSession([baseClaim("claim-corrupt")]);
+    const roles: RoleId[] = ["contadores", "metodico"];
+    const first = await runEval({ ...evalOpts(session, okDriver().driver), roles });
+    expect(first.code).toBe(0);
+
+    // Hand-edit the state with a literal the validator rejects.
+    const statePath = join(stateDir(session), "state.json");
+    const raw = JSON.parse(readFileSync(statePath, "utf8")) as EvaluatorState;
+    const recorded = raw.claims[0];
+    expect(recorded).toBeDefined();
+    if (recorded === undefined) throw new Error("missing recorded claim");
+    recorded.verdicts[0] = {
+      ...recorded.verdicts[0],
+      severidad: "critical",
+    } as unknown as Verdict;
+    writeFileSync(statePath, JSON.stringify(raw, null, 2) + "\n");
+    rmSync(join(stateDir(session), "cache.json")); // force the driver path
+
+    const { driver, calls } = okDriver();
+    const second = await runEval({ ...evalOpts(session, driver), roles });
+
+    expect(calls.map((call) => call.role)).toEqual(["contadores"]);
+    expect(second.code).toBe(0);
+    expect(second.state.claims[0]?.verdicts).toHaveLength(2);
+    for (const verdict of second.state.claims[0]?.verdicts ?? []) {
+      expect(["aviso", "bloqueante"]).toContain(verdict.severidad);
+    }
+  });
+
+  it("a driver that returns no verdicts is a declared gap, never exit 0", async () => {
+    const session = newSession([baseClaim("claim-empty")]);
+    const driver: Driver = async () => ({ verdicts: [], calls: 1 });
+
+    const result = await runEval({
+      ...evalOpts(session, driver),
+      roles: ["contadores"],
+    });
+
+    expect(result.code).toBe(1);
+    const rc = recordedClaim(result.state, "claim-empty");
+    expect(rc.recheck).toBe("sin-re-verificar");
+    expect(rc.verdicts[0]).toMatchObject({
+      resultado: "sin-re-verificar",
+      hallazgo: "driver returned no verdicts",
+    });
+  });
+
+  it("unreviewedPairs flags a requested role missing both verdict and recheck", () => {
+    const claim = baseClaim("claim-x") as unknown as RecordedClaim["claim"];
+    const reviewed: Verdict = {
+      claimId: "claim-x",
+      role: "contadores",
+      resultado: "ok",
+      severidad: "aviso",
+      hallazgo: "",
+      evidencia: [],
+    };
+    const recorded: RecordedClaim = { claim, hash: "h", verdicts: [reviewed] };
+
+    expect(unreviewedPairs([recorded], ["contadores", "metodico"])).toEqual([
+      { claim: "claim-x", role: "metodico" },
+    ]);
+    // A declared pause already accounts for the missing pairs.
+    expect(
+      unreviewedPairs([{ ...recorded, recheck: "interrumpido" }], [
+        "contadores",
+        "metodico",
+      ]),
+    ).toEqual([]);
   });
 
   it("empty roles list ⇒ code 3, no state written, driver never called", async () => {

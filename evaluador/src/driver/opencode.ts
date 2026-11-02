@@ -4,6 +4,7 @@
 // retry) degrades to a Verdict with resultado "sin-re-verificar" and severity
 // "bloqueante" (see docs/superpowers/specs/2026-10-31-evaluador-design.md).
 import { spawn } from "node:child_process";
+import { RESULTADOS, SEVERIDADES } from "./types.js";
 import type {
   AgentCall,
   AgentResult,
@@ -11,6 +12,10 @@ import type {
   SpawnFn,
   Verdict,
 } from "./types.js";
+
+// Back-compat re-export: the sets now live with the Verdict schema (types.ts)
+// so state/cache can share them without importing the subprocess driver.
+export { RESULTADOS, SEVERIDADES };
 
 // Injected when the claim cites nothing fetchable (allowlist lives in Task 6).
 const NO_FETCH_PHRASE = "No hagas fetch: marca resultado sin-re-verificar";
@@ -117,11 +122,8 @@ function extractVerdictJson(stdout: string): string | undefined {
   return fenced !== undefined ? fenced : lastBareJsonObject(stdout);
 }
 
-// Literal sets accepted by the manual Verdict validation. Exported so the
-// orchestrator's cross-suite test can pin them against every rubric (Task 6
-// carry: rubric/driver schema drift must not silently degrade every verdict).
-export const RESULTADOS = new Set(["ok", "problema", "sin-re-verificar"]);
-export const SEVERIDADES = new Set(["aviso", "bloqueante"]);
+// Literal sets accepted by the manual Verdict validation (defined with the
+// schema in types.ts; re-exported above for existing importers).
 
 // Manual field validation of Verdict (no ajv, no schema lib): every required
 // field present with the right primitive type / literal value. A `role` that

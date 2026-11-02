@@ -46,6 +46,7 @@ import { dirname, join, resolve } from "node:path";
 import { Budget } from "./budget.js";
 import { VerdictCache } from "./cache.js";
 import type { Claim } from "./contract.js";
+import { isVerdict } from "./driver/types.js";
 import type { AgentCall, AgentResult, Driver, Verdict } from "./driver/types.js";
 import { runGate } from "./gate.js";
 import type { Gap } from "./gate.js";
@@ -120,7 +121,10 @@ const HONEST_LABELS = new Set<string>([
 
 // Reads `<dir>/state.json`; `dir` is the `.evaluador` working directory.
 // Never throws: a missing, unreadable, corrupt, wrong-version or wrong-shaped
-// file is simply "no resumable state" (null).
+// file is simply "no resumable state" (null). Individually invalid verdict
+// entries are DROPPED (not fatal): the pair is then missing and the normal
+// resume path re-drives it, so a corrupt literal can never be read as "ok" or
+// keep a bogus blocker alive.
 export function loadState(dir: string): EvaluatorState | null {
   let raw: unknown;
   try {
@@ -128,7 +132,20 @@ export function loadState(dir: string): EvaluatorState | null {
   } catch {
     return null;
   }
-  return isEvaluatorState(raw) ? raw : null;
+  if (!isEvaluatorState(raw)) return null;
+  return sanitizeState(raw);
+}
+
+// Drops verdict entries that fail the shared runtime validator (literal
+// membership included). Everything else in the state is kept verbatim.
+function sanitizeState(state: EvaluatorState): EvaluatorState {
+  return {
+    ...state,
+    claims: state.claims.map((recorded) => ({
+      ...recorded,
+      verdicts: recorded.verdicts.filter(isVerdict),
+    })),
+  };
 }
 
 // Writes `<dir>/state.json` (pretty JSON, trailing newline), creating `dir` if
@@ -147,25 +164,13 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function isVerdict(value: unknown): value is Verdict {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.claimId === "string" &&
-    typeof value.role === "string" &&
-    typeof value.resultado === "string" &&
-    typeof value.severidad === "string" &&
-    typeof value.hallazgo === "string" &&
-    isStringArray(value.evidencia)
-  );
-}
-
 function isRecordedClaim(value: unknown): value is RecordedClaim {
   if (!isRecord(value)) return false;
   if (!isRecord(value.claim) || typeof value.claim.id !== "string") return false;
   if (typeof value.hash !== "string") return false;
-  if (!Array.isArray(value.verdicts) || !value.verdicts.every(isVerdict)) {
-    return false;
-  }
+  // Verdict entries are validated one by one in sanitizeState (dropping the bad
+  // ones); the claim shape only needs the container to be an array.
+  if (!Array.isArray(value.verdicts)) return false;
   if (
     value.recheck !== undefined &&
     value.recheck !== "presupuesto-agotado" &&
@@ -521,6 +526,19 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
     HONEST_LABELS.has(recorded.claim.etiqueta),
   );
 
+  // Defensive pre-exit invariant: every pair this run requested must end with a
+  // verdict or a declared recheck. Unreachable in normal flow (a driver miss is
+  // converted to a failure verdict), but cheap insurance against a future
+  // refactor returning a vacuous 0.
+  const missingPairs = unreviewedPairs(claims, roles);
+  let code: 0 | 1 = anyBlocking || !allHonest || anyGap ? 1 : 0;
+  if (code === 0 && missingPairs.length > 0) {
+    console.error(
+      `evaluador: warning: ${missingPairs.length} requested claim/role pair(s) have no verdict; refusing exit 0`,
+    );
+    code = 1;
+  }
+
   const state: EvaluatorState = {
     version: 1,
     reporte: reportHash,
@@ -558,13 +576,32 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   writeOutputs(outDir, state, issues, runStats);
 
   return {
-    code: anyBlocking || !allHonest || anyGap ? 1 : 0,
+    code,
     state,
     budget: opts.budget,
     spentThisRun,
     cacheHits,
     cacheMisses,
   };
+}
+
+// Claim/role pairs that the pre-exit invariant must reject: no verdict and no
+// declared recheck. Exported so the defensive branch is unit-testable even
+// though the normal flow cannot reach it.
+export function unreviewedPairs(
+  claims: RecordedClaim[],
+  roles: RoleId[],
+): Array<{ claim: string; role: RoleId }> {
+  const missing: Array<{ claim: string; role: RoleId }> = [];
+  for (const recorded of claims) {
+    if (recorded.recheck !== undefined) continue;
+    for (const role of roles) {
+      if (!recorded.verdicts.some((verdict) => verdict.role === role)) {
+        missing.push({ claim: recorded.claim.id, role });
+      }
+    }
+  }
+  return missing;
 }
 
 // Claim + evidence serialization handed to a reviewer. The claim object already

@@ -13,6 +13,7 @@
 // See docs/superpowers/specs/2026-10-31-evaluador-design.md.
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { isVerdict } from "./driver/types.js";
 import type { Verdict } from "./driver/types.js";
 import type { RoleId } from "./rubric.js";
 import { writeFileAtomic } from "./state.js";
@@ -25,6 +26,10 @@ export interface CachedVerdict {
 
 type Store = Record<string, Partial<Record<RoleId, CachedVerdict>>>;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export class VerdictCache {
   private readonly path: string;
   private store: Store | null = null; // lazy: null until the first get
@@ -33,16 +38,30 @@ export class VerdictCache {
     this.path = path;
   }
 
-  // Cached verdict for a hash + role, or undefined on any miss (including an
-  // unknown role id: non-destructive by design, never throws).
+  // Cached verdict for a hash + role, or undefined on any miss. The record is
+  // validated on read (verdict literals, string metadata): a corrupt or
+  // hand-edited entry is a miss, never a throw and never a bogus adoption.
   get(hash: string, role: RoleId): Verdict | undefined {
-    return this.loaded()[hash]?.[role]?.verdict;
+    const entry = (this.loaded() as Record<string, unknown>)[hash];
+    if (!isRecord(entry)) return undefined;
+    const record = entry[role];
+    if (!isRecord(record)) return undefined;
+    if (!isVerdict(record.verdict)) return undefined;
+    if (typeof record.model !== "string" || typeof record.updatedAt !== "string") {
+      return undefined;
+    }
+    return record.verdict;
   }
 
-  // Records a verdict in memory; persistence happens only on save().
+  // Records a verdict in memory; persistence happens only on save(). A nested
+  // entry that is not an object (e.g. a scalar written by another tool) is
+  // self-healed to a fresh role map instead of throwing a TypeError.
   put(hash: string, role: RoleId, verdict: Verdict, model: string, updatedAt: string): void {
     const store = this.loaded();
-    const byRole: Partial<Record<RoleId, CachedVerdict>> = store[hash] ?? {};
+    const existing = (store as Record<string, unknown>)[hash];
+    const byRole: Partial<Record<RoleId, CachedVerdict>> = isRecord(existing)
+      ? (existing as Partial<Record<RoleId, CachedVerdict>>)
+      : {};
     byRole[role] = { verdict, model, updatedAt };
     store[hash] = byRole;
   }

@@ -14,6 +14,37 @@ export type Verdict = {
   evidencia: string[];
 };
 
+// Literal sets accepted by the manual Verdict validation. Exported from the
+// driver seam (the orchestrator and the cache import them) so the schema has a
+// single source; opencode.ts re-exports them for its existing consumers.
+export const RESULTADOS = new Set(["ok", "problema", "sin-re-verificar"]);
+export const SEVERIDADES = new Set(["aviso", "bloqueante"]);
+
+// Runtime validation shared by the driver output, state loading and the verdict
+// cache. Literal membership is enforced (not just `typeof`), and a non-ok
+// verdict must carry a non-empty hallazgo: "problema"/"sin-re-verificar" owe an
+// explanation, while a bare "ok" may legitimately have none.
+export function isVerdict(value: unknown): value is Verdict {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.claimId !== "string") return false;
+  if (typeof record.role !== "string" || record.role === "") return false;
+  if (typeof record.resultado !== "string" || !RESULTADOS.has(record.resultado)) {
+    return false;
+  }
+  if (typeof record.severidad !== "string" || !SEVERIDADES.has(record.severidad)) {
+    return false;
+  }
+  if (typeof record.hallazgo !== "string") return false;
+  if (record.resultado !== "ok" && record.hallazgo.trim() === "") return false;
+  const evidencia = record.evidencia;
+  if (!Array.isArray(evidencia)) return false;
+  if (evidencia.some((item) => typeof item !== "string")) return false;
+  return true;
+}
+
 // One agent request. `allowFetch` is the resolved URL allowlist (Task 6); an
 // empty list means the agent must not fetch anything at all. `blockedFetch`
 // carries the URLs the claim cites but the allowlist rejects, so the driver can

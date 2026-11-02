@@ -145,6 +145,60 @@ describe("VerdictCache", () => {
     expect(() => cache.get("deadbeef", "metodico")).not.toThrow();
     expect(cache.get("deadbeef", "metodico")).toBeUndefined();
   });
+
+  it("a nested scalar entry is self-healed by put and misses on get", () => {
+    const path = join(newTempDir(), ".evaluador", "cache.json");
+    const claim = makeClaim("claim-nested");
+    const hash = contentHash({ claim, rubricVersion: "rubricV1" });
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ [hash]: 5 }), "utf8");
+
+    const cache = new VerdictCache(path);
+    expect(cache.get(hash, "contadores")).toBeUndefined(); // scalar: a miss
+
+    const verdict = makeVerdict("claim-nested", "contadores");
+    expect(() =>
+      cache.put(hash, "contadores", verdict, "modelo-generado-de-prueba", "2026-11-02T00:00:00.000Z"),
+    ).not.toThrow();
+    cache.save();
+
+    expect(new VerdictCache(path).get(hash, "contadores")).toEqual(verdict);
+  });
+
+  it("rejects a cached record with an invalid verdict literal or bad metadata", () => {
+    const path = join(newTempDir(), ".evaluador", "cache.json");
+    const claim = makeClaim("claim-invalid");
+    const hash = contentHash({ claim, rubricVersion: "rubricV1" });
+    const verdict = makeVerdict("claim-invalid", "contadores");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        [hash]: {
+          contadores: {
+            verdict: { ...verdict, severidad: "critical" },
+            model: "modelo-generado-de-prueba",
+            updatedAt: "2026-11-02T00:00:00.000Z",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const cache = new VerdictCache(path);
+    expect(cache.get(hash, "contadores")).toBeUndefined();
+
+    writeFileSync(
+      path,
+      JSON.stringify({
+        [hash]: {
+          contadores: { verdict, model: 42, updatedAt: "2026-11-02T00:00:00.000Z" },
+        },
+      }),
+      "utf8",
+    );
+    expect(new VerdictCache(path).get(hash, "contadores")).toBeUndefined();
+  });
 });
 
 afterAll(() => {
