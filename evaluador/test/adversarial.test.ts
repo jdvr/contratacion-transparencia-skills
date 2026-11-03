@@ -1567,6 +1567,123 @@ describe("cli eval wiring", () => {
   });
 });
 
+describe("preflight de URLs y allowlist configurable", () => {
+  // Two claims: one whose only URL is outside the allowlist, one with a single
+  // allowed URL (no second route left for the segunda-fuente role), plus one
+  // healthy claim with two allowed URLs that the preflight must not mention.
+  function preflightClaims(): Array<Record<string, unknown>> {
+    return [
+      {
+        ...baseClaim("claim-sin-url"),
+        url: "https://raw.githubusercontent.com/ejemplo/repo/x.php",
+      },
+      { ...baseClaim("claim-una-url"), url: "https://datos.canarias.es/uno" },
+      {
+        ...baseClaim("claim-dos-url"),
+        url: "https://datos.canarias.es/a https://boe.es/b",
+      },
+    ];
+  }
+
+  it("avisa antes de revisar de los claims sin URL permitida y sin segunda ruta", async () => {
+    const session = newSession(preflightClaims());
+    const lines: string[] = [];
+
+    await runEval({
+      ...evalOpts(session, okDriver().driver),
+      logger: (line) => lines.push(line),
+    });
+
+    const output = lines.filter((line) => line.includes("preflight")).join("\n");
+    expect(output).toContain("preflight");
+    expect(output).toContain("claim-sin-url");
+    expect(output).toContain("raw.githubusercontent.com");
+    expect(output).toContain("claim-una-url");
+    expect(output).toContain("segunda-fuente");
+    expect(output).not.toContain("claim-dos-url");
+    expect(output).toContain("allowHosts");
+  });
+
+  it("no emite preflight cuando todas las URLs son verificables", async () => {
+    const session = newSession([
+      {
+        ...baseClaim("claim-ok"),
+        url: "https://datos.canarias.es/a https://boe.es/b",
+      },
+    ]);
+    const lines: string[] = [];
+
+    await runEval({
+      ...evalOpts(session, okDriver().driver),
+      logger: (line) => lines.push(line),
+    });
+
+    expect(lines.filter((line) => line.includes("preflight"))).toEqual([]);
+  });
+
+  it("allowHosts amplía la allowlist del fetch y retira el claim del preflight", async () => {
+    const session = newSession(preflightClaims());
+    const { driver, calls } = okDriver();
+    const lines: string[] = [];
+
+    await runEval({
+      ...evalOpts(session, driver),
+      allowHosts: ["raw.githubusercontent.com"],
+      logger: (line) => lines.push(line),
+    });
+
+    const output = lines.filter((line) => line.includes("preflight")).join("\n");
+    // The host is now fetchable (1 URL), so the claim no longer reports a
+    // blocked source; it still lacks a second route for segunda-fuente.
+    expect(output).toContain("claim-sin-url: 1 URL permitida");
+    expect(output).not.toContain("bloqueado: raw.githubusercontent.com");
+    const githubCall = calls.find(
+      (call) => call.allowFetch[0]?.includes("raw.githubusercontent.com") === true,
+    );
+    expect(githubCall?.allowFetch).toEqual([
+      "https://raw.githubusercontent.com/ejemplo/repo/x.php",
+    ]);
+  });
+
+  it("lee allowHosts de .evaluador/config.json", async () => {
+    const session = newSession(preflightClaims());
+    const dotDir = stateDir(session);
+    mkdirSync(dotDir, { recursive: true });
+    writeFileSync(
+      join(dotDir, "config.json"),
+      JSON.stringify({ budget: 20, allowHosts: ["raw.githubusercontent.com"] }),
+    );
+    const { driver, calls } = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath], { driver, cwd: session.cwd }),
+    );
+
+    expect(code).toBe(0);
+    const githubCall = calls.find(
+      (call) => call.allowFetch[0]?.includes("raw.githubusercontent.com") === true,
+    );
+    expect(githubCall).toBeDefined();
+  });
+
+  it("un allowHosts inválido falla abierto (se ignora) y no rompe la revisión", async () => {
+    const session = newSession(preflightClaims());
+    const dotDir = stateDir(session);
+    mkdirSync(dotDir, { recursive: true });
+    writeFileSync(
+      join(dotDir, "config.json"),
+      JSON.stringify({ budget: 20, allowHosts: "no-es-una-lista" }),
+    );
+    const { driver } = okDriver();
+
+    const code = await quietly(() =>
+      main(["eval", session.reportPath], { driver, cwd: session.cwd }),
+    );
+
+    expect(code).toBe(0);
+  });
+});
+
 afterAll(() => {
   for (const dir of tempRoots) rmSync(dir, { recursive: true, force: true });
 });

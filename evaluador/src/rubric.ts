@@ -224,13 +224,15 @@ ${VERDICT_CONTRACT}`;
 // the agent must not fetch at all).
 export function resolveFetch(
   claim: Claim,
+  extraHosts: readonly string[] = [],
 ): { allowed: string[]; blocked: string[] } {
+  const extras = new Set(extraHosts.map(normalizeHost).filter((host) => host !== ""));
   const allowed: string[] = [];
   const blocked: string[] = [];
   for (const token of claim.url.split(/\s+/)) {
     if (token === "") continue;
-    const host = urlHost(token);
-    if (host !== null && isAllowedHost(host)) {
+    const host = hostOf(token);
+    if (host !== null && isAllowedHost(host, extras)) {
       allowed.push(token);
     } else {
       blocked.push(token);
@@ -242,15 +244,23 @@ export function resolveFetch(
 // www-normalization plus allowlist membership. The wildcard is deliberately
 // limited to one entry and anchored with a leading dot, so
 // "notgobiernodecanarias.org" and "gobiernodecanarias.org.evil.com" stay blocked.
-function isAllowedHost(rawHost: string): boolean {
-  const host = rawHost.startsWith("www.") ? rawHost.slice("www.".length) : rawHost;
+// `extraHosts` comes from the human's `.evaluador/config.json` decision and is
+// matched exactly (after the same www-normalization): no new wildcards.
+function isAllowedHost(rawHost: string, extraHosts: ReadonlySet<string>): boolean {
+  const host = normalizeHost(rawHost);
   if (host === WILDCARD_HOST || host.endsWith(`.${WILDCARD_HOST}`)) return true;
-  return (ALLOWED_HOSTS as readonly string[]).includes(host);
+  if ((ALLOWED_HOSTS as readonly string[]).includes(host)) return true;
+  return extraHosts.has(host);
+}
+
+function normalizeHost(rawHost: string): string {
+  const host = rawHost.trim().toLowerCase();
+  return host.startsWith("www.") ? host.slice("www.".length) : host;
 }
 
 // Extracts the lowercase hostname of a URL token; scheme-less tokens are
 // tried as https URLs. Returns null when the token has no host at all.
-function urlHost(token: string): string | null {
+export function hostOf(token: string): string | null {
   for (const candidate of [token, `https://${token}`]) {
     try {
       const { hostname } = new URL(candidate);

@@ -225,6 +225,32 @@ describe("resolveFetch(claim)", () => {
     expect(blocked).toEqual(["::", "malformado"]);
   });
 
+  it("an extra host from config allows only that exact host", () => {
+    const url = "https://raw.githubusercontent.com/mantisbt/x/core/email_api.php";
+    expect(resolveFetch(makeClaim(url)).allowed).toEqual([]);
+
+    const { allowed, blocked } = resolveFetch(makeClaim(url), [
+      "raw.githubusercontent.com",
+    ]);
+    expect(allowed).toEqual([url]);
+    expect(blocked).toEqual([]);
+  });
+
+  it("extra hosts are www-normalized and never wildcarded", () => {
+    const urls =
+      "https://services.nvd.nist.gov/rest/json/cves/2.0 " +
+      "https://services.nvd.nist.gov.evil.com/x " +
+      "https://sub.services.nvd.nist.gov/x";
+    const { allowed, blocked } = resolveFetch(makeClaim(urls), [
+      "www.services.nvd.nist.gov",
+    ]);
+    expect(allowed).toEqual(["https://services.nvd.nist.gov/rest/json/cves/2.0"]);
+    expect(blocked).toEqual([
+      "https://services.nvd.nist.gov.evil.com/x",
+      "https://sub.services.nvd.nist.gov/x",
+    ]);
+  });
+
   it("empty or whitespace-only url yields nothing to fetch", () => {
     expect(resolveFetch(makeClaim(""))).toEqual({ allowed: [], blocked: [] });
     expect(resolveFetch(makeClaim("   ")).allowed).toEqual([]);

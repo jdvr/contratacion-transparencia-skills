@@ -53,7 +53,7 @@ import type { Gap } from "./gate.js";
 import { createIssueBranches, writeIssues } from "./issues.js";
 import { writeOutputs } from "./report.js";
 import type { RunStats } from "./report.js";
-import { DEFAULT_ROLES, RUBRIC_VERSION, resolveFetch, rubricFor } from "./rubric.js";
+import { DEFAULT_ROLES, RUBRIC_VERSION, hostOf, resolveFetch, rubricFor } from "./rubric.js";
 import type { RoleId } from "./rubric.js";
 import { contentHash, writeFileAtomic } from "./state.js";
 
@@ -270,6 +270,9 @@ export interface RunEvalOptions {
   // Opt-in git branches for blocking issues (`--git-branches`, default off in
   // v1). Branch failures only warn; they never change the exit code.
   gitBranches?: boolean;
+  // Hosts the human authorised on top of ALLOWED_HOSTS (`.evaluador/config.json`
+  // {"allowHosts": [...]}). Exact match after www-normalization; no wildcards.
+  allowHosts?: string[];
 }
 
 // Run-scoped accounting for the final summary (Task 11 carry #3): `state`
@@ -445,6 +448,13 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
       `timeout ${formatDuration(timeoutMs)}/call`,
   );
 
+  // Preflight (before spending a single call): the reviewer can only fetch the
+  // URLs in `claim.url` whose host passes the allowlist. A claim with zero
+  // fetchable URLs is a guaranteed `sin-re-verificar`; a claim with only one
+  // cannot give `segunda-fuente` a logically distinct route. Surfacing this up
+  // front turns an expensive round of blockers into an actionable line.
+  emitPreflight(gate.claims, opts.allowHosts ?? [], emit);
+
   const previous = loadState(stateDir);
   const budget = new Budget(opts.budget);
   // A state from another schema or rubric version is not resumable; cache keys
@@ -578,7 +588,7 @@ export async function runEval(opts: RunEvalOptions): Promise<RunEvalResult> {
   const runPair = async (task: PairTask): Promise<void> => {
     const { acc, role, roleIndex } = task;
     const tag = pairTag(task, totalPairs);
-    const fetchRules = resolveFetch(acc.claim);
+    const fetchRules = resolveFetch(acc.claim, opts.allowHosts ?? []);
     const call: AgentCall = {
       role,
       rubric: rubricFor(role),
@@ -845,6 +855,52 @@ export function unreviewedPairs(
     }
   }
   return missing;
+}
+
+// Preflight diagnostic: warns about claims the reviewer will not be able to
+// check, before the run spends budget. Two cases cost a guaranteed
+// `sin-re-verificar`: zero fetchable URLs (the source sits outside the
+// allowlist) and a single one (no logically distinct route for segunda-fuente).
+// It only emits lines; it never changes state, budget or exit codes.
+function emitPreflight(
+  claims: readonly Claim[],
+  allowHosts: readonly string[],
+  emit: (line: string) => void,
+): void {
+  const blockedHosts = new Set<string>();
+  const problems: string[] = [];
+  for (const claim of claims) {
+    const { allowed, blocked } = resolveFetch(claim, allowHosts);
+    if (allowed.length >= 2) continue;
+    if (allowed.length === 0) {
+      const hosts = [...new Set(blocked.map((token) => hostOf(token)).filter(isString))];
+      for (const host of hosts) blockedHosts.add(host);
+      problems.push(
+        `  ${claim.id}: 0 URL(s) permitida(s); bloqueado: ${hosts.join(", ") || "(sin URL)"}`,
+      );
+    } else {
+      problems.push(
+        `  ${claim.id}: 1 URL permitida; sin segunda ruta para segunda-fuente`,
+      );
+    }
+  }
+  if (problems.length === 0) return;
+  const lines = [
+    `evaluador: preflight — ${problems.length} claim(s) con evidencia no verificable por la allowlist:`,
+    ...problems,
+  ];
+  if (blockedHosts.size > 0) {
+    const sorted = [...blockedHosts].sort();
+    lines.push(
+      `evaluador: amplía la allowlist en .evaluador/config.json si es una fuente legítima: ` +
+        `{"allowHosts": ${JSON.stringify(sorted)}}`,
+    );
+  }
+  emit(lines.join("\n"));
+}
+
+function isString(value: string | null): value is string {
+  return typeof value === "string" && value !== "";
 }
 
 // Claim + evidence serialization handed to a reviewer. The claim object already

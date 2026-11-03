@@ -224,6 +224,8 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
     return EXIT_UNKNOWN_COMMAND;
   }
 
+  const config = loadConfig(deps.cwd ?? process.cwd());
+
   try {
     const result = await runEval({
       reportPath: file,
@@ -231,7 +233,8 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
       noCache,
       roles,
       model,
-      budget: budget ?? loadBudget(deps.cwd ?? process.cwd()),
+      budget: budget ?? config.budget,
+      allowHosts: config.allowHosts,
       driver: deps.driver ?? opencodeDriver(),
       cwd: deps.cwd ?? process.cwd(),
       // The flag wins over the test seam, so an embedded caller can still cap
@@ -260,25 +263,38 @@ async function runEvalCommand(args: string[], deps: MainDeps): Promise<number> {
   }
 }
 
-// Reads the per-run budget from `<cwd>/.evaluador/config.json` (created by
-// `init` as `{"budget": 20}`). A missing, unreadable or corrupt file — or a
-// non-integer/negative value — fails open to DEFAULT_BUDGET: a broken config
-// must not silently disable the review or allow an unbounded run.
-function loadBudget(cwd: string): number {
+// Reads the per-run settings from `<cwd>/.evaluador/config.json` (created by
+// `init` as `{"budget": 20}`). `budget` is the request cap for this run;
+// `allowHosts` is the human's decision to extend the fetch allowlist (exact
+// hosts, no wildcards). A missing, unreadable or corrupt file — or an invalid
+// value — fails open to the defaults: a broken config must not silently disable
+// the review, allow an unbounded run, or widen the allowlist by accident.
+function loadConfig(cwd: string): { budget: number; allowHosts: string[] } {
+  const fallback = { budget: DEFAULT_BUDGET, allowHosts: [] as string[] };
   try {
     const raw: unknown = JSON.parse(
       readFileSync(join(cwd, ".evaluador", "config.json"), "utf8"),
     );
-    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
-      const value = (raw as Record<string, unknown>).budget;
-      if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
-        return value;
-      }
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return fallback;
     }
+    const record = raw as Record<string, unknown>;
+    const budget =
+      typeof record.budget === "number" &&
+      Number.isInteger(record.budget) &&
+      record.budget >= 0
+        ? record.budget
+        : DEFAULT_BUDGET;
+    const allowHosts = Array.isArray(record.allowHosts)
+      ? record.allowHosts.filter(
+          (host): host is string => typeof host === "string" && host.trim() !== "",
+        )
+      : [];
+    return { budget, allowHosts };
   } catch {
-    // Fall through to the default (fail-open, documented above).
+    // Fall through to the defaults (fail-open, documented above).
+    return fallback;
   }
-  return DEFAULT_BUDGET;
 }
 
 function printUsage(): void {

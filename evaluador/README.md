@@ -79,6 +79,29 @@ in the sequential mode). `spentThisRun` and `petitions` record the real calls.
 Four concurrent clients can hit provider rate limits on free models; use
 `--jobs 2` if that happens.
 
+## Config file (`.evaluador/config.json`)
+
+`init` scaffolds `{"budget": 20}`; every `eval` reads two optional keys:
+
+- `budget` (integer ≥ 0): request cap for the run when `--budget` is absent.
+- `allowHosts` (array of host names): hosts the human authorises **on top of**
+  the built-in list (`datos.canarias.es`, `gobiernodecanarias.org` and its
+  subdomains, `contrataciondelestado.es`, `boe.es`, `ted.europa.eu`). Matching is
+  exact after one leading `www.`; there are no new wildcards. Example:
+
+```json
+{"budget": 90, "allowHosts": ["raw.githubusercontent.com", "services.nvd.nist.gov"]}
+```
+
+A missing, unreadable or invalid value fails open to the defaults (budget 20, no
+extra hosts): a broken config never widens the allowlist by accident.
+
+Before the first driver call, `eval` prints a **preflight** to stderr listing
+claims with zero fetchable URLs (their source sits outside the allowlist) and
+claims with only one (the `segunda-fuente` role has no logically distinct route).
+It names the blocked hosts so the human can decide whether to add them. The
+preflight is diagnostic only: it skips no pair and does not change the exit code.
+
 ## Build and host
 
 `npm run build` bundles everything into `dist/cli.js`: one self-contained ESM
