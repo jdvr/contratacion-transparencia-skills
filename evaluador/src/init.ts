@@ -27,7 +27,8 @@ solo en VERIFICADO, o si se publica):
   - afirmacion         la afirmación tal y como aparece en el reporte
   - cifra              la cifra concreta (en VERIFICADO)
   - fuente             dataset + resource id / expediente + ficha / notice
-  - url                la URL exacta que produjo el dato
+  - url                una o varias URLs separadas por espacio; solo se
+                       fetchean los hosts de la allowlist (ver Fetch)
   - fecha_dato         el periodo real del dato (≠ fecha de consulta)
   - fecha_consulta     la fecha en que se consultó la fuente
   - criterio           el criterio de selección que define el total
@@ -51,15 +52,102 @@ Condiciones para exit 0 (cierre completo):
      agotado se declaran (hueco declarado ⇒ exit 1); exit 0 es sin huecos.
 `;
 
+// Usage guide (Spanish, like the contract). It is the single source for the
+// CLI `help` command and for the `.evaluador/CONTRATO.md` that `init` leaves
+// behind, so a working directory can be understood without the repo's README.
+export const HELP_GENERAL = `Usage: evaluador <comando> [args]
+
+Comandos:
+  init                     Imprime el contrato + esta guía y crea .evaluador/
+  eval <reporte.md>        Gate estructural + revisión adversarial
+  help [comando]           Esta ayuda, o la de \`eval\` / \`init\`
+  --help                   Igual que \`help\`
+
+Flujo: \`evaluador init\` una vez por directorio, escribe el informe y ejecuta
+\`evaluador eval reporte.md\`. \`evaluador help eval\` detalla flags, config,
+fetch, roles, artefactos y códigos de salida.
+
+Config y fetch: .evaluador/config.json acepta \`budget\` y \`allowHosts\` (hosts
+extra autorizados para que el revisor consulte las fuentes citadas).`;
+
+export const HELP_EVAL = `Uso de \`evaluador eval <reporte.md>\`
+
+Flags:
+  -o <dir>                  Carpeta de los 4 artefactos (por defecto, junto al informe)
+  --no-cache                Ignora la caché de veredictos y re-revisa todo
+  --budget N                Tope de llamadas al revisor en esta ejecución
+  --roles a,b               Subconjunto de roles (por defecto, los cuatro)
+  --model provider/model    Modelo del revisor; forma parte de la clave de caché
+  --timeout segundos        Timeout por llamada (300 s por defecto)
+  --jobs N                  Pares claim×rol en paralelo (4 por defecto)
+  --git-branches            Crea problema/<claimId> para bloqueos (opt-in)
+
+Config (.evaluador/config.json, lo crea \`init\`; tus cambios mandan):
+  {"budget": 20, "allowHosts": ["host.ejemplo"]}
+  - budget      entero ≥ 0; tope por ejecución si no pasas --budget.
+  - allowHosts  hosts extra que autorizas para fetch, además de:
+                datos.canarias.es, gobiernodecanarias.org (+ subdominios),
+                contrataciondelestado.es, boe.es, ted.europa.eu
+                Coincidencia exacta tras quitar un \`www.\` inicial; sin comodines.
+  Un valor inválido se ignora (budget 20, sin hosts extra).
+
+Fetch y preflight:
+  El revisor solo puede abrir las URLs del campo \`url\` del claim cuyo host esté
+  en la allowlist. Por eso \`url\` admite varias URLs separadas por espacio.
+  Antes de la primera llamada, \`eval\` avisa por stderr de los claims con 0 URLs
+  permitidas y de los que solo tienen 1 (la segunda-fuente no tendrá ruta
+  lógicamente distinta), y nombra los hosts bloqueados.
+
+Roles (\`--roles\`, ids ASCII):
+  contadores       filas_traidas vs conteo_declarado, criterio del total, mezclas
+  segunda-fuente   contraste por vía lógicamente distinta (CKAN/CSV, PLACSP/BOE/TED)
+  falsificador     GROUP BY alternativo, filtro inverso, rango mayor
+  metodico         cobertura, presupuesto de peticiones, contenedor/encoding, etiquetas
+  Alias: contador, segunda. Orden por defecto: contadores → segunda-fuente →
+  falsificador → metódico.
+
+Artefactos (por ejecución):
+  reporte-final.md / reporte-final.html   informe con claims, veredictos e issues
+  evidencia.json                          claims + veredictos, reutilizable
+  resumen.json                            contadores de la ejecución
+  .evaluador/{state.json,issues/}         estado reanudable e issues abiertas
+
+Códigos de salida:
+  0  exit 0: cierre completo, sin bloqueantes y sin huecos
+  1  exit 1: terminó con bloqueantes o huecos declarados (issues escritas)
+  2  exit 2: el gate estructural falló (JSON con los huecos en stdout; sin estado)
+  3  exit 3: error de uso, flag inválido, informe ilegible o roles vacíos`;
+
+export const HELP_INIT = `Uso de \`evaluador init\`
+
+  - Imprime el contrato del informe y esta guía por stdout.
+  - Crea .evaluador/config.json con {"budget": 20} si no existe; nunca
+    sobrescribe un config existente (tus claves, incluido \`allowHosts\`, mandan).
+  - Escribe o refresca .evaluador/CONTRATO.md con este mismo documento, para
+    que el directorio de trabajo se explique solo en cualquier sesión.
+  - Crea .evaluador/issues/ vacío. El estado y la caché aparecen en el primer
+    \`eval\`.`;
+
+// Full document left in the working directory and printed by `init`. Contract
+// first (what a claim must contain), then how to use the tool.
+export const INIT_GUIDE = `${HELP_GENERAL}
+
+${HELP_EVAL}
+
+${HELP_INIT}`;
+export const INIT_DOC = `${INIT_CONTRACT}
+${INIT_GUIDE}`;
+
 // Default config when .evaluador/config.json does not exist yet: the cached
 // request budget per run (responsible-use decision from the spec).
 const DEFAULT_CONFIG = '{"budget": 20}\n';
 
 // Runs the init command scripted: scaffolds <cwd>/.evaluador/ and prints the
-// report contract through `stdout` (the CLI passes a writer that preserves the
-// trailing newlines of the chunks). Returns exit 0.
-// Existing config.json is never touched; when it already exists, a notice
-// saying so is printed after the contract.
+// contract + usage guide through `stdout` (the CLI passes a writer that
+// preserves the trailing newlines of the chunks). Returns exit 0.
+// The guide is also persisted as `.evaluador/CONTRATO.md` (tool-owned, so it is
+// refreshed on every run) while a user-owned config.json is never touched; when
+// it already exists, a notice saying so is printed after the document.
 export async function initScripted(
   cwd: string,
   stdout: (s: string) => void,
@@ -67,12 +155,14 @@ export async function initScripted(
   const dotDir = join(cwd, ".evaluador");
   const issuesDir = join(dotDir, "issues");
   const configPath = join(dotDir, "config.json");
+  const docPath = join(dotDir, "CONTRATO.md");
 
   // recursive: creates .evaluador/ and .evaluador/issues/ (empty) in one call,
   // and is a no-op when they already exist.
   mkdirSync(issuesDir, { recursive: true });
 
-  stdout(INIT_CONTRACT);
+  stdout(INIT_DOC);
+  writeFileSync(docPath, INIT_DOC);
   if (existsSync(configPath)) {
     stdout(`respetado: ${configPath} ya existe; no se ha tocado\n`);
   } else {

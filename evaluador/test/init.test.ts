@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { initScripted, INIT_CONTRACT } from "../src/init.js";
+import { initScripted, INIT_CONTRACT, INIT_DOC } from "../src/init.js";
 
 let tempRoot = "";
 
@@ -56,12 +56,53 @@ describe("init", () => {
     expect(stdout.out).toContain("NO CONCLUYENTE");
   });
 
-  it("(d) prints the contract text exported as INIT_CONTRACT", async () => {
+  it("(d) prints the contract plus the usage guide (INIT_DOC)", async () => {
     const stdout = collector();
     const cwd = newCwd();
     const exit = await initScripted(cwd, stdout.write);
     expect(exit).toBe(0);
-    expect(stdout.out).toBe(INIT_CONTRACT);
+    expect(stdout.out).toBe(INIT_DOC);
+    expect(stdout.out).toContain(INIT_CONTRACT);
+  });
+
+  it("(e) persiste el mismo documento en .evaluador/CONTRATO.md", async () => {
+    const stdout = collector();
+    const cwd = newCwd();
+    await initScripted(cwd, stdout.write);
+    const doc = join(cwd, ".evaluador", "CONTRATO.md");
+    expect(existsSync(doc)).toBe(true);
+    expect(readFileSync(doc, "utf8")).toBe(INIT_DOC);
+  });
+
+  it("(f) el documento explica flags, config, multi-URL, roles, artefactos y exit 3", async () => {
+    const stdout = collector();
+    await initScripted(newCwd(), stdout.write);
+    for (const token of [
+      "--jobs",
+      "--no-cache",
+      "--roles",
+      "--model",
+      "--timeout",
+      "--git-branches",
+      "allowHosts",
+      "una o varias URLs",
+      "segunda-fuente",
+      "reporte-final.md",
+      "exit 3",
+    ]) {
+      expect(stdout.out, `init should document ${token}`).toContain(token);
+    }
+  });
+
+  it("(g) re-run refresca CONTRATO.md pero nunca toca config.json", async () => {
+    const stdout = collector();
+    const cwd = newCwd();
+    await initScripted(cwd, stdout.write);
+    writeFileSync(join(cwd, ".evaluador", "CONTRATO.md"), "doc viejo\n");
+    writeFileSync(join(cwd, ".evaluador", "config.json"), '{"budget": 99}\n');
+    await initScripted(cwd, stdout.write);
+    expect(readFileSync(join(cwd, ".evaluador", "CONTRATO.md"), "utf8")).toBe(INIT_DOC);
+    expect(readFileSync(join(cwd, ".evaluador", "config.json"), "utf8")).toBe('{"budget": 99}\n');
   });
 
   afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));

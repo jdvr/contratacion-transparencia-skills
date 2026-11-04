@@ -32,8 +32,12 @@ cd evaluador
 npm ci
 npm run build
 
-# Print the report contract and scaffold .evaluador/ in the current directory:
+# Print the report contract + usage guide, scaffold .evaluador/ and leave the
+# same document in .evaluador/CONTRATO.md:
 node dist/cli.js init
+
+# Per-command help (no arguments = general help, same text as --help):
+node dist/cli.js help [eval|init]
 
 # Gate + adversarial review. Writes .evaluador/state.json, .evaluador/issues/,
 # and reporte-final.md/.html + evidencia.json + resumen.json next to the report

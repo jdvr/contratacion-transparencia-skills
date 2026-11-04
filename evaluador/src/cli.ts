@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { runEval } from "./adversarial.js";
 import { opencodeDriver } from "./driver/opencode.js";
 import type { Driver } from "./driver/types.js";
-import { initScripted } from "./init.js";
+import { HELP_EVAL, HELP_GENERAL, HELP_INIT, initScripted } from "./init.js";
 import { DEFAULT_ROLES, ROLE_ALIASES } from "./rubric.js";
 import type { RoleId } from "./rubric.js";
 
@@ -297,16 +297,23 @@ function loadConfig(cwd: string): { budget: number; allowHosts: string[] } {
   }
 }
 
-function printUsage(): void {
-  const lines = [
-    "Usage: evaluador <command> [args]",
-    "",
-    "Commands:",
-    "  init   Document the report contract and scaffold .evaluador/ here",
-    "  eval <file> [-o <dir>] [--no-cache] [--budget N] [--roles a,b] [--model provider/model] [--timeout seconds] [--jobs N] [--git-branches]  Run the structural gate and adversarial review",
-    "  --help Show this help",
-  ];
-  console.log(lines.join("\n"));
+// `help` / `--help` / bare invocation. One source for both the terminal and
+// the `.evaluador/CONTRATO.md` that `init` leaves behind (init.ts).
+function printHelp(topic: string | undefined): number {
+  if (topic === undefined) {
+    console.log(HELP_GENERAL);
+    return EXIT_OK;
+  }
+  if (topic === "eval") {
+    console.log(HELP_EVAL);
+    return EXIT_OK;
+  }
+  if (topic === "init") {
+    console.log(HELP_INIT);
+    return EXIT_OK;
+  }
+  console.error(`evaluador: unknown help topic: ${topic}`);
+  return EXIT_UNKNOWN_COMMAND;
 }
 
 // Parses the argument vector and returns the process exit code. The top-level
@@ -322,11 +329,12 @@ export async function main(
 
   try {
     if (command === undefined || command === "--help" || command === "-h") {
-      printUsage();
-      return EXIT_OK;
+      return printHelp(args[0]);
     }
 
     switch (command) {
+      case "help":
+        return printHelp(args[0]);
       case "init":
         return await runInit(args);
       case "eval":

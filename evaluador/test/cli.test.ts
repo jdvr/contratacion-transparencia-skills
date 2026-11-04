@@ -249,3 +249,70 @@ describe("cli via npm-bin symlink", () => {
     afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
   });
 });
+
+describe("help por comando", () => {
+  async function captured(fn: () => Promise<number>): Promise<{
+    code: number;
+    stdout: string;
+    stderr: string[];
+  }> {
+    const log = console.log;
+    const error = console.error;
+    const out: string[] = [];
+    const err: string[] = [];
+    console.log = (...args: unknown[]) => {
+      out.push(args.map(String).join(" "));
+    };
+    console.error = (...args: unknown[]) => {
+      err.push(args.map(String).join(" "));
+    };
+    try {
+      return { code: await fn(), stdout: out.join("\n"), stderr: err };
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+  }
+
+  it("help sin argumentos enseña comandos, flags y config", async () => {
+    const res = await captured(() => main(["help"]));
+    expect(res.code).toBe(0);
+    expect(res.stdout).toMatch(/^Usage: evaluador/);
+    expect(res.stdout).toContain("allowHosts");
+    expect(res.stdout).toContain("eval <reporte.md>");
+  });
+
+  it("help eval detalla flags, preflight, roles, artefactos y exit codes", async () => {
+    const res = await captured(() => main(["help", "eval"]));
+    expect(res.code).toBe(0);
+    for (const token of [
+      "--jobs",
+      "--budget",
+      "--no-cache",
+      "--roles",
+      "--model",
+      "--timeout",
+      "--git-branches",
+      "-o <dir>",
+      "allowHosts",
+      "preflight",
+      "exit 3",
+      "reporte-final.md",
+    ]) {
+      expect(res.stdout, `help eval should document ${token}`).toContain(token);
+    }
+  });
+
+  it("help init explica el scaffold y CONTRATO.md", async () => {
+    const res = await captured(() => main(["help", "init"]));
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("CONTRATO.md");
+    expect(res.stdout).toContain("config.json");
+  });
+
+  it("help de un comando desconocido es exit 3", async () => {
+    const res = await captured(() => main(["help", "nope"]));
+    expect(res.code).toBe(3);
+    expect(res.stderr.join("\n")).toContain("nope");
+  });
+});
