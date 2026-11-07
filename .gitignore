@@ -1,3 +1,5 @@
 # material local de construcción, NO publicar
 .local-mining/
 .DS_Store
+# evaluador working state (may contain real report data: never commit it)
+.evaluador/

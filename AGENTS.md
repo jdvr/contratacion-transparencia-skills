@@ -25,6 +25,7 @@ Todo dato publicado necesita lo siguiente; si falta algo, es una pista, no un re
 | ¿Cifras agregadas de gasto/contratos de un órgano NO canario? | `placsp` (fichas/expedientes) + `ckan` (si hay portal de open data) | la skill autonómica si existe |
 | ¿Documentos de transparencia de GobCan (retribuciones, RPT, contratos en PDF)? | `canarias-transparencia-portal` | `canarias-datos-abiertos` para las cifras |
 | ¿En salud (SCS) o educación de Canarias? | `canarias-datos-publicos-playbook` | según el dato: portal, CKAN o ISTAC |
+| ¿Cerrar un análisis con cifras (revisión adversarial estructurada, issues y reporte final)? | `evaluador` (binario del repo: `evaluador init` + `evaluador eval reporte.md`; ver `evaluador/README.md`) | corregir cada issue con la skill del dato y re-verificar |
 
 ## Controles y revisión adversarial (obligatorios: antes de dar cualquier cifra)
 
