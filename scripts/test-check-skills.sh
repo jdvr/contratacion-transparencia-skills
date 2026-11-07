@@ -150,6 +150,13 @@ expect 1 "huérfana" "$R" "nombre que aparece como subcadena en otra skill"
 R="$(make_root)"; mkdir -p "$R/skills/sin-skill"
 expect 1 "SKILL.md" "$R" "directorio sin SKILL.md"
 
+# `evaluador/` es el harness del repo, no una skill: un directorio con ese
+# nombre bajo skills/ no debe validarse (el guard `not_a_skill` es intencional
+# para este nombre; una skill real nunca puede llamarse `evaluador`).
+R="$(make_root)"; mkdir -p "$R/skills/evaluador"
+printf -- '---\nname: no-skill\n' > "$R/skills/evaluador/SKILL.md"
+expect 0 "0 errores" "$R" "evaluador/ no se valida como skill"
+
 R="$(make_root)"; mkdir -p "$R/skills/collision"
 printf -- '---\nname: mal\n\n# X\n\nTexto con frontmatter abierto.\n\n---\n\n**Idea central:** x\n' > "$R/skills/collision/SKILL.md"
 expect 1 "frontmatter sin cerrar" "$R" "frontmatter abierto y --- tardío en el cuerpo"

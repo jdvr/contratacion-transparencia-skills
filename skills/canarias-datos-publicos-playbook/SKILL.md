@@ -79,4 +79,10 @@ Si falta cualquiera de 1–5, el dato es una pista, no un resultado.
 5. Contraste con el documento oficial si la cifra es publicable (1 req).
 6. Cachea el resultado en local con su ficha de evidencia.
 
+**Cierre con cifras publicables:** antes de publicar, cierra el círculo con el
+harness del repo: `evaluador init` fija el contrato de evidencia y
+`evaluador eval reporte.md` corre la revisión adversarial, deja los issues en
+`.evaluador/issues/` y escribe el reporte final. Exit 0 = cerrado sin
+bloqueantes; 1 = bloqueantes o huecos por corregir. Ver `evaluador/README.md`.
+
 **Verificado: 2026-10-28** (construida con el repo; sin re-ejecutar en vivo desde entonces).

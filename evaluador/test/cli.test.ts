@@ -1,0 +1,318 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, chmodSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { main, parseEvalArgs } from "../src/cli.js";
+
+const testDir = dirname(fileURLToPath(import.meta.url));
+const srcDir = join(testDir, "..", "src");
+
+// Captures stderr so usage-error messages can be asserted without noise.
+async function caught(fn: () => Promise<number>): Promise<{
+  code: number;
+  stderr: string[];
+}> {
+  const error = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    return { code: await fn(), stderr: lines };
+  } finally {
+    console.error = error;
+  }
+}
+
+describe("cli", () => {
+  it("saca exit 3 para comand unknown", async () =>
+    expect(await main(["nonsense"])).toBe(3));
+  it("saca exit 0 para --help", async () =>
+    expect(await main(["--help"])).toBe(0));
+});
+
+describe("parseEvalArgs", () => {
+  it("parses the happy path values, including --roles aliases", () => {
+    const parsed = parseEvalArgs([
+      "reporte.md",
+      "-o",
+      "salida",
+      "--no-cache",
+      "--budget",
+      "0",
+      "--roles",
+      "contador,falsificador",
+      "--model",
+      "opencode-go/deepseek-v4.1-flash",
+      "--git-branches",
+    ]);
+
+    expect(parsed).toEqual({
+      ok: true,
+      args: {
+        file: "reporte.md",
+        outDir: "salida",
+        noCache: true,
+        gitBranches: true,
+        budget: 0,
+        roles: ["contadores", "falsificador"],
+        model: "opencode-go/deepseek-v4.1-flash",
+      },
+    });
+  });
+
+  it("rejects a missing or flag-looking --model value", () => {
+    expect(parseEvalArgs(["reporte.md", "--model"])).toEqual({
+      ok: false,
+      message: "--model requires a provider/model value",
+    });
+    expect(parseEvalArgs(["reporte.md", "--model", "-foo"])).toEqual({
+      ok: false,
+      message: "--model requires a provider/model value",
+    });
+  });
+
+  it("passes the --model value through verbatim (no format validation)", () => {
+    const parsed = parseEvalArgs(["reporte.md", "--model", "mi-backend/v2:beta"]);
+    expect(parsed).toMatchObject({
+      ok: true,
+      args: { model: "mi-backend/v2:beta" },
+    });
+  });
+
+  it("parses --timeout seconds into timeoutMs", () => {
+    const parsed = parseEvalArgs(["reporte.md", "--timeout", "90"]);
+    expect(parsed).toMatchObject({ ok: true, args: { timeoutMs: 90_000 } });
+  });
+
+  it("rejects a missing, zero, negative or non-numeric --timeout", () => {
+    for (const argv of [
+      ["reporte.md", "--timeout"],
+      ["reporte.md", "--timeout", "0"],
+      ["reporte.md", "--timeout", "-5"],
+      ["reporte.md", "--timeout", "9s"],
+    ]) {
+      expect(parseEvalArgs(argv)).toEqual({
+        ok: false,
+        message: "--timeout requires a positive integer of seconds",
+      });
+    }
+  });
+
+  it("parses --jobs as a positive integer", () => {
+    const parsed = parseEvalArgs(["reporte.md", "--jobs", "3"]);
+    expect(parsed).toMatchObject({ ok: true, args: { jobs: 3 } });
+  });
+
+  it("rejects a missing, zero, negative or non-numeric --jobs", () => {
+    for (const argv of [
+      ["reporte.md", "--jobs"],
+      ["reporte.md", "--jobs", "0"],
+      ["reporte.md", "--jobs", "-1"],
+      ["reporte.md", "--jobs", "tres"],
+    ]) {
+      expect(parseEvalArgs(argv)).toEqual({
+        ok: false,
+        message: "--jobs requires a positive integer",
+      });
+    }
+  });
+
+  it("rejects an unknown flag naming it (typo --no-chache)", () => {
+    expect(parseEvalArgs(["reporte.md", "--no-chache"])).toEqual({
+      ok: false,
+      message: "unknown flag: --no-chache",
+    });
+  });
+
+  it("rejects a second positional argument", () => {
+    expect(parseEvalArgs(["uno.md", "dos.md"])).toEqual({
+      ok: false,
+      message: "unexpected extra argument: dos.md",
+    });
+  });
+
+  it("rejects a flag-looking value after -o or --budget", () => {
+    expect(parseEvalArgs(["reporte.md", "-o", "--no-cache"])).toEqual({
+      ok: false,
+      message: "-o requires an output directory",
+    });
+    expect(parseEvalArgs(["reporte.md", "--budget", "-1"])).toEqual({
+      ok: false,
+      message: "--budget requires a non-negative integer",
+    });
+  });
+
+  it("rejects an unknown role naming it, and accepts the canonical ids", () => {
+    expect(parseEvalArgs(["reporte.md", "--roles", "contador,noexiste"])).toEqual({
+      ok: false,
+      message: "unknown role: noexiste",
+    });
+    const canonical = parseEvalArgs(["reporte.md", "--roles", "segunda-fuente,metodico"]);
+    expect(canonical).toMatchObject({
+      ok: true,
+      args: { roles: ["segunda-fuente", "metodico"] },
+    });
+  });
+
+  it("still requires the report path and a non-empty --roles value", () => {
+    expect(parseEvalArgs(["--no-cache"])).toEqual({
+      ok: false,
+      message: "eval requires a report file path",
+    });
+    expect(parseEvalArgs(["reporte.md", "--roles", "--no-cache"])).toEqual({
+      ok: false,
+      message: "--roles requires a comma-separated role list",
+    });
+  });
+});
+
+describe("cli strict usage errors", () => {
+  it("an unknown flag exits 3 with a message naming it", async () => {
+    const { code, stderr } = await caught(() => main(["eval", "reporte.md", "--no-chache"]));
+    expect(code).toBe(3);
+    expect(stderr.join("\n")).toContain("unknown flag: --no-chache");
+  });
+
+  it("extra positionals exit 3 without running anything", async () => {
+    const { code, stderr } = await caught(() => main(["eval", "uno.md", "dos.md"]));
+    expect(code).toBe(3);
+    expect(stderr.join("\n")).toContain("unexpected extra argument: dos.md");
+  });
+});
+
+// npm-bin invocation contract: installed bins run through a symlink
+// (node_modules/.bin/evaluador -> dist/cli.js), so exit codes and output must
+// propagate even when process.argv[1] is the symlinked path.
+describe("cli via npm-bin symlink", () => {
+  const skip = process.platform === "win32"; // symlinks need privileges on win32
+  (skip ? describe.skip : describe)("compiled binary", () => {
+    let tempRoot = "";
+    let cliJs = ""; // the bundled, non-symlinked entry
+    let binSymlink = ""; // npm-bin style symlink to cliJs
+
+    beforeAll(async () => {
+      tempRoot = mkdtempSync(join(tmpdir(), "evaluador-test-"));
+      cliJs = join(tempRoot, "dist-cli.js");
+      binSymlink = join(tempRoot, "bin", "evaluador");
+
+      const { build } = await import("esbuild");
+      await build({
+        entryPoints: [join(srcDir, "cli.ts")],
+        outfile: cliJs,
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        target: "node22",
+        banner: { js: "#!/usr/bin/env node" },
+      });
+
+      mkdirSync(dirname(binSymlink), { recursive: true });
+      symlinkSync(cliJs, binSymlink);
+    });
+
+    it("propaga exit 3 y mensaje de stderr para comando unknown", () => {
+      const res = spawnSync(process.execPath, [binSymlink, "nonsense"], { encoding: "utf8" });
+      expect(res.status).toBe(3);
+      expect(res.stderr).toMatch(/unknown command: nonsense/);
+      expect(res.stdout).toBe("");
+    });
+
+    it("propaga exit 0 y usage en stdout para --help", () => {
+      const res = spawnSync(process.execPath, [binSymlink, "--help"], { encoding: "utf8" });
+      expect(res.status).toBe(0);
+      expect(res.stderr).toBe("");
+      expect(res.stdout).toMatch(/^Usage: evaluador/);
+    });
+
+    it("init en un directorio sin escritura ⇒ exit 3 con mensaje en stderr", () => {
+      // Root bypasses permission bits: the scenario is not reproducible there.
+      if (typeof process.getuid === "function" && process.getuid() === 0) return;
+
+      const parent = mkdtempSync(join(tmpdir(), "evaluador-unwritable-"));
+      chmodSync(parent, 0o500);
+      try {
+        const res = spawnSync(process.execPath, [binSymlink, "init"], {
+          cwd: parent,
+          encoding: "utf8",
+        });
+        expect(res.status).toBe(3);
+        expect(res.stderr).toMatch(/^evaluador: /);
+      } finally {
+        chmodSync(parent, 0o700);
+        rmSync(parent, { recursive: true, force: true });
+      }
+    });
+
+    afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
+  });
+});
+
+describe("help por comando", () => {
+  async function captured(fn: () => Promise<number>): Promise<{
+    code: number;
+    stdout: string;
+    stderr: string[];
+  }> {
+    const log = console.log;
+    const error = console.error;
+    const out: string[] = [];
+    const err: string[] = [];
+    console.log = (...args: unknown[]) => {
+      out.push(args.map(String).join(" "));
+    };
+    console.error = (...args: unknown[]) => {
+      err.push(args.map(String).join(" "));
+    };
+    try {
+      return { code: await fn(), stdout: out.join("\n"), stderr: err };
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+  }
+
+  it("help sin argumentos enseña comandos, flags y config", async () => {
+    const res = await captured(() => main(["help"]));
+    expect(res.code).toBe(0);
+    expect(res.stdout).toMatch(/^Usage: evaluador/);
+    expect(res.stdout).toContain("allowHosts");
+    expect(res.stdout).toContain("eval <reporte.md>");
+  });
+
+  it("help eval detalla flags, preflight, roles, artefactos y exit codes", async () => {
+    const res = await captured(() => main(["help", "eval"]));
+    expect(res.code).toBe(0);
+    for (const token of [
+      "--jobs",
+      "--budget",
+      "--no-cache",
+      "--roles",
+      "--model",
+      "--timeout",
+      "--git-branches",
+      "-o <dir>",
+      "allowHosts",
+      "preflight",
+      "exit 3",
+      "reporte-final.md",
+    ]) {
+      expect(res.stdout, `help eval should document ${token}`).toContain(token);
+    }
+  });
+
+  it("help init explica el scaffold y CONTRATO.md", async () => {
+    const res = await captured(() => main(["help", "init"]));
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("CONTRATO.md");
+    expect(res.stdout).toContain("config.json");
+  });
+
+  it("help de un comando desconocido es exit 3", async () => {
+    const res = await captured(() => main(["help", "nope"]));
+    expect(res.code).toBe(3);
+    expect(res.stderr.join("\n")).toContain("nope");
+  });
+});
